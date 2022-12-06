@@ -48,6 +48,12 @@ public class MjMeshFilter : MonoBehaviour {
       throw new ArgumentException("Unsupported geom shape detected");
     }
 
+    if(_geom.ShapeType == MjShapeComponent.ShapeTypes.Mesh) { 
+      MjMeshShape meshShape = _geom.Shape as MjMeshShape;
+      _meshFilter.sharedMesh = meshShape.Mesh;
+      return;
+    }
+
     DisposeCurrentMesh();
 
     var mesh = new Mesh();
@@ -76,7 +82,7 @@ public class MjMeshFilter : MonoBehaviour {
   // Dynamically created meshes with no references are only disposed automatically on scene changes.
   // This prevents resource leaks in case the host environment doesn't reload scenes.
   private void DisposeCurrentMesh() {
-    if (_meshFilter.sharedMesh != null) {
+    if (_meshFilter.sharedMesh != null && _geom.ShapeType != MjShapeComponent.ShapeTypes.Mesh) {
 #if UNITY_EDITOR
       DestroyImmediate(_meshFilter.sharedMesh);
 #else
