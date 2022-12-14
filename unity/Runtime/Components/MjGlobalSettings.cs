@@ -376,7 +376,7 @@ public class MjGlobalSettings : MonoBehaviour {
 
   public void OptionSizeToMjcf(XmlElement option, XmlElement size) {
     GlobalOptions.ToMjcf(option);
-    GlobalSizes.ToMjcf(size);
+    // GlobalSizes.ToMjcf(size);
   }
 }
 }
