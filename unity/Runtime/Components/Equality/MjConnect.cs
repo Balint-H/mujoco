@@ -22,6 +22,7 @@ namespace Mujoco {
   public class MjConnect : MjBaseConstraint {
     public MjBaseBody Body1;
     public MjBaseBody Body2;
+    public Vector3 anchor;
     protected override string _constraintName => "connect";
 
     protected override void FromMjcf(XmlElement mjcf) {
@@ -39,6 +40,9 @@ namespace Mujoco {
       }
       mjcf.SetAttribute("body1", Body1.MujocoName);
       mjcf.SetAttribute("body2", Body2.MujocoName);
+      
+      Vector3 mjAnchor = MjEngineTool.MjVector3(anchor);
+      mjcf.SetAttribute("anchor", $"{mjAnchor.x} {mjAnchor.y} {mjAnchor.z}");
     }
 
     public void OnValidate() {
