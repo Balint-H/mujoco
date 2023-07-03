@@ -78,12 +78,15 @@ public class MjScene : MonoBehaviour {
 
   private List<MjComponent> _orderedComponents;
 
-  public EventHandler preUpdateEvent;
-  public EventHandler<MjStepArgs> ctrlCallback;
-  public EventHandler postUpdateEvent;
+  public event EventHandler preUpdateEvent;
+  public event EventHandler<MjStepArgs> ctrlCallback;
+  public event EventHandler postUpdateEvent;
+
+  public event EventHandler<MjStepArgs> sceneCreatedCallback;
 
   protected unsafe void Start() {
     CreateScene();
+    sceneCreatedCallback?.Invoke(this, new MjStepArgs(Model, Data));
   }
 
   protected unsafe void OnDestroy() {
@@ -467,8 +470,6 @@ public class MjScene : MonoBehaviour {
       Debug.LogWarning("Failed to save Xml to a file: " + ex.ToString(), this);
     }
   }
-
-
 }
 
   public class MjStepArgs : EventArgs
