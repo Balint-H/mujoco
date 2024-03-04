@@ -70,6 +70,7 @@ public struct MjcfOptionFlag {
   public EnableDisableFlag FilterParent;
   public EnableDisableFlag Actuation;
   public EnableDisableFlag RefSafe;
+  public EnableDisableFlag EulerDamp;
   public EnableDisableFlag Override;
   public EnableDisableFlag Energy;
   public EnableDisableFlag FwdInv;
@@ -88,6 +89,7 @@ public struct MjcfOptionFlag {
     FilterParent = EnableDisableFlag.enable,
     Actuation = EnableDisableFlag.enable,
     RefSafe = EnableDisableFlag.enable,
+    EulerDamp = EnableDisableFlag.enable,
     Override = EnableDisableFlag.disable,
     Energy = EnableDisableFlag.disable,
     FwdInv = EnableDisableFlag.disable,
@@ -111,6 +113,7 @@ public struct MjcfOptionFlag {
                                                             localDefault.FilterParent);
     Actuation = mjcf.GetEnumAttribute<EnableDisableFlag>("actuation", localDefault.Actuation);
     RefSafe = mjcf.GetEnumAttribute<EnableDisableFlag>("refsafe", localDefault.RefSafe);
+    EulerDamp = mjcf.GetEnumAttribute<EnableDisableFlag>("eulerdamp", localDefault.EulerDamp);
     Override = mjcf.GetEnumAttribute<EnableDisableFlag>("override", localDefault.Override);
     Energy = mjcf.GetEnumAttribute<EnableDisableFlag>("energy", localDefault.Energy);
     FwdInv = mjcf.GetEnumAttribute<EnableDisableFlag>("fwdinv", localDefault.FwdInv);
@@ -131,6 +134,7 @@ public struct MjcfOptionFlag {
     mjcf.SetAttribute("filterparent", FilterParent.ToString());
     mjcf.SetAttribute("actuation", Actuation.ToString());
     mjcf.SetAttribute("refsafe", RefSafe.ToString());
+    mjcf.SetAttribute("eulerdamp", EulerDamp.ToString());
     mjcf.SetAttribute("override", Override.ToString());
     mjcf.SetAttribute("energy", Energy.ToString());
     mjcf.SetAttribute("fwdinv", FwdInv.ToString());
@@ -187,6 +191,8 @@ public struct MjOptionStruct {
   public ConstraintSolverType Solver;
   [Tooltip("Maximum iterations for the constraint solver.")]
   public int Iterations;
+  [Tooltip("Maximum iterations for line search.")]
+  public int LsIterations;
   [Tooltip("Threshold used for early termination of the constraint solver.")]
   public float Tolerance;
   [Tooltip("Maximum iterations for the no-slip phase of the constraint solver.")]
@@ -215,6 +221,7 @@ public struct MjOptionStruct {
     Jacobian = JacobianType.auto,
     Solver = ConstraintSolverType.Newton,
     Iterations = 100,
+    LsIterations = 50,
     Tolerance = 1e-8f,
     NoSlipIterations = 0,
     NoSlipTolerance = 1e-6f,
@@ -258,6 +265,7 @@ public struct MjOptionStruct {
     Solver = mjcf.GetEnumAttribute<ConstraintSolverType>("solver", localDefault.Solver);
 
     Iterations = (int)mjcf.GetFloatAttribute("iterations", localDefault.Iterations);
+    LsIterations = (int)mjcf.GetFloatAttribute("ls_iterations", localDefault.LsIterations);
     Tolerance = mjcf.GetFloatAttribute("tolerance", localDefault.Tolerance);
     NoSlipIterations = (int)mjcf.GetFloatAttribute(
         "noslip_iterations", localDefault.NoSlipIterations);
@@ -292,6 +300,7 @@ public struct MjOptionStruct {
     mjcf.SetAttribute("solver", Solver.ToString());
 
     mjcf.SetAttribute("iterations", MjEngineTool.MakeLocaleInvariant($"{Iterations}"));
+    mjcf.SetAttribute("ls_iterations", MjEngineTool.MakeLocaleInvariant($"{LsIterations}"));
     mjcf.SetAttribute("tolerance", MjEngineTool.MakeLocaleInvariant($"{Tolerance}"));
     mjcf.SetAttribute("noslip_iterations", MjEngineTool.MakeLocaleInvariant($"{NoSlipIterations}"));
     mjcf.SetAttribute("noslip_tolerance", MjEngineTool.MakeLocaleInvariant($"{NoSlipTolerance}"));
