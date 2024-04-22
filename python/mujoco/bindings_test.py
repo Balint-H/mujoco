@@ -529,6 +529,7 @@ class MuJoCoBindingsTest(parameterized.TestCase):
     expected_ncon = 4
     mujoco.mj_forward(self.model, self.data)
     self.assertLen(self.data.contact, expected_ncon)
+    np.testing.assert_array_equal(self.data.contact.geom, [[0, 1]] * 4)
 
     expected_pos = []
     for contact in self.data.contact:
@@ -550,6 +551,13 @@ class MuJoCoBindingsTest(parameterized.TestCase):
       contact.H = expected_H[-1]
     self.assertLen(expected_H, expected_ncon)
     np.testing.assert_array_equal(self.data.contact.H, expected_H)
+
+    expected_geom = []
+    for i, contact in enumerate(self.data.contact):
+      expected_geom.append([i, i + 1])
+      contact.geom = expected_geom[-1]
+    self.assertLen(expected_geom, expected_ncon)
+    np.testing.assert_array_equal(self.data.contact.geom, expected_geom)
 
   def test_realloc_con_efc(self):
     self.assertEmpty(self.data.contact)
@@ -615,7 +623,7 @@ class MuJoCoBindingsTest(parameterized.TestCase):
     self.assertEqual(struct, struct2)
 
     self.assertNotEqual(struct, 3)
-    self.assertNotEqual(struct, None)
+    self.assertIsNotNone(struct)
 
     # mutable structs shouldn't declare __hash__
     with self.assertRaises(TypeError):
@@ -697,7 +705,8 @@ class MuJoCoBindingsTest(parameterized.TestCase):
 
     # Check that the output argument must have the correct dtype.
     with self.assertRaises(TypeError):
-      mujoco.mju_rotVecQuat(vec, quat, res=np.zeros(3, int))
+      res = np.zeros(3, np.int32)
+      mujoco.mju_rotVecQuat(res, vec, quat)
 
   def test_getsetstate(self):  # pylint: disable=invalid-name
     mujoco.mj_step(self.model, self.data)
@@ -735,6 +744,16 @@ class MuJoCoBindingsTest(parameterized.TestCase):
 
     # Expect next states to be equal.
     np.testing.assert_array_equal(state1a, state1b)
+
+  def test_mj_angmomMat(self):  # pylint: disable=invalid-name
+    self.data.qvel = np.ones(self.model.nv, np.float64)
+    mujoco.mj_forward(self.model, self.data)
+    mujoco.mj_subtreeVel(self.model, self.data)
+
+    mat = np.empty((3, 10), np.float64)
+    mujoco.mj_angmomMat(self.model, self.data, mat, 0)
+    np.testing.assert_almost_equal(mat @ self.data.qvel,
+                                   self.data.subtree_angmom[0, :])
 
   def test_mj_jacSite(self):  # pylint: disable=invalid-name
     mujoco.mj_forward(self.model, self.data)
@@ -822,7 +841,7 @@ Euler integrator, semi-implicit in velocity.
     self.assertLen(mujoco.mjRNDSTRING, mujoco.mjtRndFlag.mjNRNDFLAG)
     self.assertEqual(mujoco.mjDISABLESTRING[11], 'Refsafe')
     self.assertEqual(mujoco.mjVISSTRING[mujoco.mjtVisFlag.mjVIS_INERTIA],
-                     ('&Inertia', '0', 'I'))
+                     ('Inertia', '0', 'I'))
 
   def test_enum_values(self):
     self.assertEqual(mujoco.mjtJoint.mjJNT_FREE, 0)
@@ -832,15 +851,14 @@ Euler integrator, semi-implicit in velocity.
     self.assertEqual(mujoco.mjtEnableBit.mjENBL_OVERRIDE, 1<<0)
     self.assertEqual(mujoco.mjtEnableBit.mjENBL_ENERGY, 1<<1)
     self.assertEqual(mujoco.mjtEnableBit.mjENBL_FWDINV, 1<<2)
-    self.assertEqual(mujoco.mjtEnableBit.mjENBL_SENSORNOISE, 1<<4)
-    self.assertEqual(mujoco.mjtEnableBit.mjNENABLE, 7)
+    self.assertEqual(mujoco.mjtEnableBit.mjNENABLE, 6)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_PLANE, 0)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_HFIELD, 1)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_SPHERE, 2)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_ARROW, 100)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_ARROW1, 101)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_ARROW2, 102)
-    self.assertEqual(mujoco.mjtGeom.mjGEOM_TRIANGLE, 107)
+    self.assertEqual(mujoco.mjtGeom.mjGEOM_TRIANGLE, 108)
     self.assertEqual(mujoco.mjtGeom.mjGEOM_NONE, 1001)
 
   def test_enum_from_int(self):
@@ -1197,10 +1215,16 @@ Euler integrator, semi-implicit in velocity.
 
   def test_mjd_sub_quat(self):
     quat1 = np.array((0.2, 0.3, 0.3, 0.4))
-    quat2 = np.array((0.2, 0.3, 0.3, 0.4))
+    quat2 = np.array((0.1, 0.2, 0.4, 0.5))
     d1 = np.empty(9, np.float64)
     d2 = np.empty(9, np.float64)
     mujoco.mjd_subQuat(quat1, quat2, d1, d2)
+    d3 = np.empty((3, 3), np.float64)
+    d4 = np.empty((3, 3), np.float64)
+    mujoco.mjd_subQuat(quat1, quat2, None, d3)
+    mujoco.mjd_subQuat(quat1, quat2, d4, None)
+    np.testing.assert_array_equal(d2, d3.flatten())
+    np.testing.assert_array_equal(d1, d4.flatten())
 
   def test_mjd_quat_intergrate(self):
     scale = 0.1
@@ -1278,6 +1302,23 @@ Euler integrator, semi-implicit in velocity.
     vec2 = np.array([3., 2., 1.])
     mat = np.array([[1., 2., 3.], [4., 5., 6.], [7., 8., 9.]])
     self.assertEqual(mujoco.mju_mulVecMatVec(vec1, mat, vec2), 204.)
+
+  def test_mju_euler_to_quat(self):
+    quat = np.zeros(4)
+    euler = np.array([0, np.pi/2, 0])
+    seq = 'xyz'
+    mujoco.mju_euler2Quat(quat, euler, seq)
+    expected_quat = np.array([np.sqrt(0.5), 0, np.sqrt(0.5), 0.])
+    np.testing.assert_almost_equal(quat, expected_quat)
+
+    error = 'mju_euler2Quat: seq must contain exactly 3 characters'
+    with self.assertRaisesWithLiteralMatch(mujoco.FatalError, error):
+      mujoco.mju_euler2Quat(quat, euler, 'xy')
+    with self.assertRaisesWithLiteralMatch(mujoco.FatalError, error):
+      mujoco.mju_euler2Quat(quat, euler, 'xyzy')
+    error = 'mju_euler2Quat: seq[2] is \'p\', should be one of x, y, z, X, Y, Z'
+    with self.assertRaisesWithLiteralMatch(mujoco.FatalError, error):
+      mujoco.mju_euler2Quat(quat, euler, 'xYp')
 
   @parameterized.product(flg_html=(False, True), flg_pad=(False, True))
   def test_mj_printSchema(self, flg_html, flg_pad):  # pylint: disable=invalid-name

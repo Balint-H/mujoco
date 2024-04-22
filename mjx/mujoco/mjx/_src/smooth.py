@@ -19,12 +19,16 @@ from jax import numpy as jp
 import mujoco
 from mujoco.mjx._src import math
 from mujoco.mjx._src import scan
+from mujoco.mjx._src import support
 # pylint: disable=g-importing-member
+from mujoco.mjx._src.types import CamLightType
 from mujoco.mjx._src.types import Data
 from mujoco.mjx._src.types import DisableBit
 from mujoco.mjx._src.types import JointType
 from mujoco.mjx._src.types import Model
+from mujoco.mjx._src.types import TrnType
 # pylint: enable=g-importing-member
+import numpy as np
 
 
 def kinematics(m: Model, d: Data) -> Data:
@@ -93,21 +97,24 @@ def kinematics(m: Model, d: Data) -> Data:
       m.body_quat,
   )
 
-  @jax.vmap
-  def local_to_global(pos1, quat1, pos2, quat2):
-    pos = pos1 + math.rotate(pos2, quat1)
-    mat = math.quat_to_mat(math.quat_mul(quat1, quat2))
-    return pos, mat
+  v_local_to_global = jax.vmap(support.local_to_global)
 
   # TODO(erikfrey): confirm that quats are more performant for mjx than mats
-  xipos, ximat = local_to_global(xpos, xquat, m.body_ipos, m.body_iquat)
-  geom_xpos, geom_xmat = local_to_global(
-      xpos[m.geom_bodyid], xquat[m.geom_bodyid], m.geom_pos, m.geom_quat
-  )
-
+  xipos, ximat = v_local_to_global(xpos, xquat, m.body_ipos, m.body_iquat)
   d = d.replace(qpos=qpos, xanchor=xanchor, xaxis=xaxis, xpos=xpos)
   d = d.replace(xquat=xquat, xmat=xmat, xipos=xipos, ximat=ximat)
-  d = d.replace(geom_xpos=geom_xpos, geom_xmat=geom_xmat)
+
+  if m.ngeom:
+    geom_xpos, geom_xmat = v_local_to_global(
+        xpos[m.geom_bodyid], xquat[m.geom_bodyid], m.geom_pos, m.geom_quat
+    )
+    d = d.replace(geom_xpos=geom_xpos, geom_xmat=geom_xmat)
+
+  if m.nsite:
+    site_xpos, site_xmat = v_local_to_global(
+        xpos[m.site_bodyid], xquat[m.site_bodyid], m.site_pos, m.site_quat
+    )
+    d = d.replace(site_xpos=site_xpos, site_xmat=site_xmat)
 
   return d
 
@@ -126,20 +133,23 @@ def com_pos(m: Model, d: Data) -> Data:
   pos, mass = scan.body_tree(
       m, subtree_sum, 'bb', 'bb', d.xipos, m.body_mass, reverse=True
   )
-  cond = jp.tile(mass < jp.array(mujoco.mjMINVAL), (3, 1)).T
-  subtree_com = jp.where(cond, d.xipos, jax.vmap(jp.divide)(pos, mass))
+  cond = jp.tile(mass < mujoco.mjMINVAL, (3, 1)).T
+  # take maximum to avoid NaN in gradient of jp.where
+  subtree_com = jax.vmap(jp.divide)(pos, jp.maximum(mass, mujoco.mjMINVAL))
+  subtree_com = jp.where(cond, d.xipos, subtree_com)
   d = d.replace(subtree_com=subtree_com)
 
   # map inertias to frame centered at subtree_com
   @jax.vmap
   def inert_com(inert, ximat, off, mass):
     h = jp.cross(off, -jp.eye(3))
-    inert = ximat @ jp.diag(inert) @ ximat.T + h @ h.T * mass
+    inert = math.matmul_unroll((ximat * inert), ximat.T)
+    inert += math.matmul_unroll(h, h.T) * mass
     # cinert is triu(inert), mass * off, mass
-    inert = inert[(jp.array([0, 1, 2, 0, 0, 1]), jp.array([0, 1, 2, 1, 2, 2]))]
-    return jp.concatenate([inert, off * mass, jp.expand_dims(mass, 0)])
+    inert = inert[([0, 1, 2, 0, 0, 1], [0, 1, 2, 1, 2, 2])]
+    return jp.concatenate([inert, off * mass, mass[None]])
 
-  root_com = subtree_com[jp.array(m.body_rootid)]
+  root_com = subtree_com[m.body_rootid]
   offset = d.xipos - root_com
   cinert = inert_com(m.body_inertia, d.ximat, offset, m.body_mass)
   d = d.replace(cinert=cinert)
@@ -186,6 +196,76 @@ def com_pos(m: Model, d: Data) -> Data:
   return d
 
 
+def camlight(m: Model, d: Data) -> Data:
+  """Computes camera and light positions and orientations."""
+  if m.ncam == 0:
+    return d.replace(cam_xpos=jp.zeros((0, 3)), cam_xmat=jp.zeros((0, 3, 3)))
+
+  # use target body only if target body is specified
+  is_target_cam = (m.cam_mode == CamLightType.TARGETBODY) | (
+      m.cam_mode == CamLightType.TARGETBODYCOM
+  )
+  cam_mode = np.where(
+      is_target_cam & (m.cam_targetbodyid < 0), CamLightType.FIXED, m.cam_mode
+  )
+
+  cam_xpos, cam_xmat = jax.vmap(support.local_to_global)(
+      d.xpos[m.cam_bodyid], d.xquat[m.cam_bodyid], m.cam_pos, m.cam_quat
+  )
+
+  def fn(
+      camid,
+      cam_mode,
+      cam_xpos,
+      cam_xmat,
+      body_xpos,
+      subtree_com,
+      target_body_xpos,
+      target_subtree_com,
+  ):
+    if cam_mode == CamLightType.TRACK:
+      cam_xmat = m.cam_mat0[camid]
+      cam_xpos = body_xpos + m.cam_pos0[camid]
+    elif cam_mode == CamLightType.TRACKCOM:
+      cam_xmat = m.cam_mat0[camid]
+      cam_xpos = subtree_com + m.cam_poscom0[camid]
+    elif cam_mode in (CamLightType.TARGETBODY, CamLightType.TARGETBODYCOM):
+      # get position to look at
+      pos = target_body_xpos
+      if cam_mode == CamLightType.TARGETBODYCOM:
+        pos = target_subtree_com
+      # zaxis = -desired camera direction, in global frame
+      mat_3 = math.normalize(cam_xpos - pos)
+      # xaxis: orthogonal to zaxis and to (0,0,1)
+      mat_1 = math.normalize(jp.cross(jp.array([0.0, 0.0, 1.0]), mat_3))
+      mat_2 = math.normalize(jp.cross(mat_3, mat_1))
+      cam_xmat = jp.array([mat_1, mat_2, mat_3]).T
+    return cam_xpos, cam_xmat
+
+  cam_xpos, cam_xmat = scan.flat(
+      m,
+      fn,
+      'c' * 8,
+      'cc',
+      jp.arange(m.ncam),
+      cam_mode,
+      cam_xpos,
+      cam_xmat,
+      d.xpos[m.cam_bodyid],
+      d.subtree_com[m.cam_bodyid],
+      d.xpos[m.cam_targetbodyid],
+      d.subtree_com[m.cam_targetbodyid],
+      group_by='c',
+  )
+
+  d = d.replace(
+      cam_xpos=cam_xpos,
+      cam_xmat=cam_xmat,
+  )
+
+  return d
+
+
 def crb(m: Model, d: Data) -> Data:
   """Runs composite rigid body inertia algorithm."""
 
@@ -198,40 +278,26 @@ def crb(m: Model, d: Data) -> Data:
   crb_body = crb_body.at[0].set(0.0)
   d = d.replace(crb=crb_body)
 
-  # TODO(erikfrey): do centralized take fn?
   crb_dof = jp.take(crb_body, jp.array(m.dof_bodyid), axis=0)
   crb_cdof = jax.vmap(math.inert_mul)(crb_dof, d.cdof)
-
-  dof_i, dof_j, diag = [], [], []
-  for i in range(m.nv):
-    diag.append(len(dof_i))
-    j = i
-    while j > -1:
-      dof_i, dof_j = dof_i + [i], dof_j + [j]
-      j = m.dof_parentid[j]
-
-  crb_codf_i = jp.take(crb_cdof, jp.array(dof_i), axis=0)
-  cdof_j = jp.take(d.cdof, jp.array(dof_j), axis=0)
-  qm = jax.vmap(jp.dot)(crb_codf_i, cdof_j)
-
-  # add armature to diagonal
-  qm = qm.at[jp.array(diag)].add(m.dof_armature)
-
+  qm = support.make_m(m, crb_cdof, d.cdof, m.dof_armature)
   d = d.replace(qM=qm)
 
   return d
 
 
-def factor_m(
-    m: Model,
-    d: Data,
-    qM: jax.Array,  # pylint:disable=invalid-name
-) -> Data:
-  """Gets sparse L'*D*L factorizaton of inertia-like matrix M, assumed spd."""
+def factor_m(m: Model, d: Data) -> Data:
+  """Gets factorizaton of inertia-like matrix M, assumed spd."""
+
+  if not support.is_sparse(m):
+    qh, _ = jax.scipy.linalg.cho_factor(d.qM)
+    d = d.replace(qLD=qh)
+    return d
 
   # build up indices for where we will do backwards updates over qLD
-  # TODO(erikfrey): do fewer updates by combining non-overlapping ranges
-  dof_madr = jp.array(m.dof_Madr)
+  depth = []
+  for i in range(m.nv):
+    depth.append(depth[m.dof_parentid[i]] + 1 if m.dof_parentid[i] != -1 else 0)
   updates = {}
   madr_ds = []
   for i in range(m.nv):
@@ -242,26 +308,36 @@ def factor_m(
       madr_ij, j = madr_ij + 1, m.dof_parentid[j]
       if j == -1:
         break
-      madr_j_range = tuple(m.dof_Madr[j : j + 2])
-      updates.setdefault(madr_j_range, []).append((madr_d, madr_ij))
+      out_beg, out_end = tuple(m.dof_Madr[j : j + 2])
+      updates.setdefault(depth[j], []).append((out_beg, out_end, madr_d, madr_ij))
 
-  qld = qM
+  qld = d.qM
 
-  for (out_beg, out_end), vals in sorted(updates.items(), reverse=True):
-    madr_d, madr_ij = jp.array(vals).T
+  for _, updates in sorted(updates.items(), reverse=True):
+    # combine the updates into one update batch (per depth level)
+    rows = []
+    madr_ijs = []
+    pivots = []
+    out = []
 
-    @jax.vmap
-    def off_diag_fn(madr_d, madr_ij, qld=qld, width=out_end - out_beg):
-      qld_row = jax.lax.dynamic_slice(qld, (madr_ij,), (width,))
-      return -(qld_row[0] / qld[madr_d]) * qld_row
+    for (b, e, madr_d, madr_ij) in updates:
+      width = e - b
+      rows.append(np.arange(madr_ij, madr_ij + width))
+      madr_ijs.append(np.full((width,), madr_ij))
+      pivots.append(np.full((width,), madr_d))
+      out.append(np.arange(b, e))
+    rows = np.concatenate(rows)
+    madr_ijs = np.concatenate(madr_ijs)
+    pivots = np.concatenate(pivots)
+    out = np.concatenate(out)
 
-    qld_update = jp.sum(off_diag_fn(madr_d, madr_ij), axis=0)
-    qld = qld.at[out_beg:out_end].add(qld_update)
+    # apply the update batch
+    qld = qld.at[out].add(-(qld[madr_ijs] / qld[pivots]) * qld[rows])
     # TODO(erikfrey): determine if this minimum value guarding is necessary:
     # qld = qld.at[dof_madr].set(jp.maximum(qld[dof_madr], _MJ_MINVAL))
 
-  qld_diag = qld[dof_madr]
-  qld = (qld / qld[jp.array(madr_ds)]).at[dof_madr].set(qld_diag)
+  qld_diag = qld[m.dof_Madr]
+  qld = (qld / qld[jp.array(madr_ds)]).at[m.dof_Madr].set(qld_diag)
 
   d = d.replace(qLD=qld, qLDiagInv=1 / qld_diag)
 
@@ -271,6 +347,13 @@ def factor_m(
 def solve_m(m: Model, d: Data, x: jax.Array) -> jax.Array:
   """Computes sparse backsubstitution:  x = inv(L'*D*L)*y ."""
 
+  if not support.is_sparse(m):
+    return jax.scipy.linalg.cho_solve((d.qLD, False), x)
+
+  depth = []
+  for i in range(m.nv):
+    depth.append(depth[m.dof_parentid[i]] + 1 if m.dof_parentid[i] != -1 else 0)
+
   updates_i, updates_j = {}, {}
   for i in range(m.nv):
     madr_ij, j = m.dof_Madr[i], i
@@ -278,69 +361,23 @@ def solve_m(m: Model, d: Data, x: jax.Array) -> jax.Array:
       madr_ij, j = madr_ij + 1, m.dof_parentid[j]
       if j == -1:
         break
-      updates_i.setdefault(i, []).append((madr_ij, j))
-      updates_j.setdefault(j, []).append((madr_ij, i))
+      updates_i.setdefault(depth[i], []).append((i, madr_ij, j))
+      updates_j.setdefault(depth[j], []).append((j, madr_ij, i))
 
   # x <- inv(L') * x
-  for j, vals in sorted(updates_j.items(), reverse=True):
-    madr_ij, i = jp.array(vals).T
-    x = x.at[j].add(-jp.sum(d.qLD[madr_ij] * x[i]))
+  for _, vals in sorted(updates_j.items(), reverse=True):
+    j, madr_ij, i = np.array(vals).T
+    x = x.at[j].add(-d.qLD[madr_ij] * x[i])
 
   # x <- inv(D) * x
   x = x * d.qLDiagInv
 
   # x <- inv(L) * x
-  for i, vals in sorted(updates_i.items()):
-    madr_ij, j = jp.array(vals).T
-    x = x.at[i].add(-jp.sum(d.qLD[madr_ij] * x[j]))
+  for _, vals in sorted(updates_i.items()):
+    i, madr_ij, j = np.array(vals).T
+    x = x.at[i].add(-d.qLD[madr_ij] * x[j])
 
   return x
-
-
-def dense_m(m: Model, d: Data) -> jax.Array:
-  """Reconstitute dense mass matrix from qM."""
-
-  is_, js, madr_ijs = [], [], []
-  for i in range(m.nv):
-    madr_ij, j = m.dof_Madr[i], i
-
-    while True:
-      madr_ij, j = madr_ij + 1, m.dof_parentid[j]
-      if j == -1:
-        break
-      is_, js, madr_ijs = is_ + [i], js + [j], madr_ijs + [madr_ij]
-
-  i, j, madr_ij = (jp.array(x, dtype=jp.int32) for x in (is_, js, madr_ijs))
-
-  mat = jp.zeros((m.nv, m.nv)).at[(i, j)].set(d.qM[madr_ij])
-
-  # diagonal, upper triangular, lower triangular
-  mat = jp.diag(d.qM[jp.array(m.dof_Madr)]) + mat + mat.T
-
-  return mat
-
-
-def mul_m(m: Model, d: Data, vec: jax.Array) -> jax.Array:
-  """Multiply vector by inertia matrix."""
-
-  diag_mul = d.qM[jp.array(m.dof_Madr)] * vec
-
-  is_, js, madr_ijs = [], [], []
-  for i in range(m.nv):
-    madr_ij, j = m.dof_Madr[i], i
-
-    while True:
-      madr_ij, j = madr_ij + 1, m.dof_parentid[j]
-      if j == -1:
-        break
-      is_, js, madr_ijs = is_ + [i], js + [j], madr_ijs + [madr_ij]
-
-  i, j, madr_ij = (jp.array(x, dtype=jp.int32) for x in (is_, js, madr_ijs))
-
-  out = diag_mul.at[i].add(d.qM[madr_ij] * vec[j])
-  out = out.at[j].add(d.qM[madr_ij] * vec[i])
-
-  return out
 
 
 def com_vel(m: Model, d: Data) -> Data:
@@ -423,45 +460,118 @@ def rne(m: Model, d: Data) -> Data:
   return d
 
 
+def _site_dof_mask(m: Model) -> np.ndarray:
+  """Creates a dof mask for site transmissions."""
+  mask = np.ones((m.nu, m.nv))
+  for i in np.nonzero(m.actuator_trnid[:, 1] != -1)[0]:
+    id_, refid = m.actuator_trnid[i]
+    # intialize last dof address for each body
+    b0 = m.body_weldid[m.site_bodyid[id_]]
+    b1 = m.body_weldid[m.site_bodyid[refid]]
+    dofadr0 = m.body_dofadr[b0] + m.body_dofnum[b0] - 1
+    dofadr1 = m.body_dofadr[b1] + m.body_dofnum[b1] - 1
+
+    # find common ancestral dof, if any
+    while dofadr0 != dofadr1:
+      if dofadr0 < dofadr1:
+        dofadr1 = m.dof_parentid[dofadr1]
+      else:
+        dofadr0 = m.dof_parentid[dofadr0]
+      if dofadr0 == -1 or dofadr1 == -1:
+        break
+
+    # if common ancestral dof was found, clear the columns of its parental chain
+    da = dofadr0 if dofadr0 == dofadr1 else -1
+    while da >= 0:
+      mask[i, da] = 0.0
+      da = m.dof_parentid[da]
+
+  return mask
+
+
 def transmission(m: Model, d: Data) -> Data:
   """Computes actuator/transmission lengths and moments."""
+  # TODO: consider combining transmission calculation into fwd_actuation.
   if not m.nu:
     return d
 
-  def fn(gear, jnt_typ, m_i, m_j, qpos):
-    # handles joint transmissions only
-    if jnt_typ == JointType.FREE:
-      length = jp.zeros(1)
-      moment = gear
-      m_i = jp.repeat(m_i, 6)
-      m_j = m_j + jp.arange(6)
-    elif jnt_typ == JointType.BALL:
-      axis, _ = math.quat_to_axis_angle(qpos)
-      length = jp.dot(axis, gear[:3])[None]
-      moment = gear[:3]
-      m_i = jp.repeat(m_i, 3)
-      m_j = m_j + jp.arange(3)
-    elif jnt_typ in (JointType.SLIDE, JointType.HINGE):
-      length = qpos * gear[0]
-      moment = gear[:1]
-      m_i, m_j = m_i[None], m_j[None]
-    else:
-      raise RuntimeError(f'unrecognized joint type: {jnt_typ}')
-    return length, moment, m_i, m_j
+  def fn(
+      trntype,
+      trnid,
+      gear,
+      jnt_typ,
+      m_j,
+      qpos,
+      has_refsite,
+      site_dof_mask,
+      site_xpos,
+      site_xmat,
+      site_quat,
+  ):
+    if trntype == TrnType.JOINT:
+      if jnt_typ == JointType.FREE:
+        length = jp.zeros(1)
+        moment = gear
+        m_j = m_j + jp.arange(6)
+      elif jnt_typ == JointType.BALL:
+        axis, angle = math.quat_to_axis_angle(qpos)
+        length = jp.dot(axis * angle, gear[:3])[None]
+        moment = gear[:3]
+        m_j = m_j + jp.arange(3)
+      elif jnt_typ in (JointType.SLIDE, JointType.HINGE):
+        length = qpos * gear[0]
+        moment = gear[:1]
+        m_j = m_j[None]
+      else:
+        raise RuntimeError(f'unrecognized joint type: {JointType(jnt_typ)}')
 
-  length, m_val, m_i, m_j = scan.flat(
+      moment = jp.zeros((m.nv,)).at[m_j].set(moment)
+    elif trntype == TrnType.SITE:
+      length = jp.zeros(1)
+      id_, refid = jp.array(m.site_bodyid)[trnid]
+      jacp, jacr = support.jac(m, d, site_xpos[0], id_)
+      frame_xmat = site_xmat[0]
+      if has_refsite:
+        vecp = site_xmat[1].T @ (site_xpos[0] - site_xpos[1])
+        vecr = math.quat_sub(site_quat[0], site_quat[1])
+        length += jp.dot(jp.concatenate([vecp, vecr]), gear)
+        jacrefp, jacrefr = support.jac(m, d, site_xpos[1], refid)
+        jacp, jacr = jacp - jacrefp, jacr - jacrefr
+        frame_xmat = site_xmat[1]
+
+      jac = jp.concatenate((jacp, jacr), axis=1) * site_dof_mask[:, None]
+      wrench = jp.concatenate((frame_xmat @ gear[:3], frame_xmat @ gear[3:]))
+      moment = jac @ wrench
+    else:
+      raise RuntimeError(f'unrecognized trntype: {TrnType(trntype)}')
+
+    return length, moment
+
+  # pre-compute values for site transmissions
+  has_refsite = m.actuator_trnid[:, 1] != -1
+  site_dof_mask = _site_dof_mask(m)
+  site_quat = jax.vmap(math.quat_mul)(m.site_quat, d.xquat[m.site_bodyid])
+
+  length, moment = scan.flat(
       m,
       fn,
-      'ujujq',
-      'uvvv',
+      'uuujjquusss',
+      'uu',
+      m.actuator_trntype,
+      jp.array(m.actuator_trnid),
       m.actuator_gear,
       m.jnt_type,
-      jp.arange(m.nu),
       jp.array(m.jnt_dofadr),
       d.qpos,
+      has_refsite,
+      jp.array(site_dof_mask),
+      d.site_xpos,
+      d.site_xmat,
+      site_quat,
       group_by='u',
   )
-  moment = jp.zeros((m.nu, m.nv)).at[m_i, m_j].set(m_val)
   length = length.reshape((m.nu,))
+  moment = moment.reshape((m.nu, m.nv))
+
   d = d.replace(actuator_length=length, actuator_moment=moment)
   return d

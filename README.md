@@ -50,12 +50,13 @@ your machine.
 If you are a Python user, you might want to start with our tutorial notebooks
 running on Google Colab:
 
- - The first tutorial focuses on the basics of MuJoCo:
+ - The **introductory tutorial** teaches MuJoCo basics:
    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-deepmind/mujoco/blob/main/python/tutorial.ipynb)
- - For a more advanced example, see the LQR tutorial which creates an LQR
-   controller to balance a humanoid on one leg using MuJoCo's dynamics
-   derivatives: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-deepmind/mujoco/blob/main/python/LQR.ipynb)
- - The MJX tutorial provides usage examples of
+ - The **LQR** tutorial synthesizes a linear-quadratic controller, balancing a humanoid on one leg:
+   [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-deepmind/mujoco/blob/main/python/LQR.ipynb)
+ - The **least-squares** tutorial explains how to use the Python-based nonlinear least-squares solver:
+   [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-deepmind/mujoco/blob/main/python/least_squares.ipynb)
+ - The **MJX** tutorial provides usage examples of
    [MuJoCo XLA](https://mujoco.readthedocs.io/en/stable/mjx.html), a branch of MuJoCo written in
    JAX:
    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/google-deepmind/mujoco/blob/main/mjx/tutorial.ipynb)
@@ -164,7 +165,7 @@ These packages give users of various languages access to MuJoCo functionality:
   by [Manoj Velmurugan](https://github.com/vmanoj1996).
 - **Swift**: [swift-mujoco](https://github.com/liuliu/swift-mujoco)
 - **Java**: [mujoco-java](https://github.com/CommonWealthRobotics/mujoco-java)
-- **Julia**: [Lyceum](https://github.com/Lyceum/MuJoCo.jl) (unmaintained)
+- **Julia**: [MuJoCo.jl](https://github.com/JamieMair/MuJoCo.jl)
 
 
 ### Converters

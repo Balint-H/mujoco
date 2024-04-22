@@ -26,11 +26,12 @@
 struct mjResource_ {
   char* name;                                   // name of resource (filename, etc)
   void* data;                                   // opaque data pointer
+  char timestamp[512];                          // timestamp of the resource
   const struct mjpResourceProvider* provider;   // pointer to the provider
 };
 typedef struct mjResource_ mjResource;
 
-// callback for opeing a resource, returns zero on failure
+// callback for opening a resource, returns zero on failure
 typedef int (*mjfOpenResource)(mjResource* resource);
 
 // callback for reading a resource
@@ -44,10 +45,12 @@ typedef void (*mjfCloseResource)(mjResource* resource);
 // sets dir to directory string with ndir being size of directory string
 typedef void (*mjfGetResourceDir)(mjResource* resource, const char** dir, int* ndir);
 
-// callback for checking if a resource was modified since last read
-// returns > 0 if resource was modified since last open, 0 if resource was not
-// modified, and < 0 if inconclusive
-typedef int (*mjfResourceModified)(const mjResource* resource);
+// callback for checking if the current resource was modified from the time
+// specified by the timestamp
+// returns 0 if the resource's timestamp matches the provided timestamp
+// returns > 0 if the the resource is younger than the given timestamp
+// returns < 0 if the resource is older than the given timestamp
+typedef int (*mjfResourceModified)(const mjResource* resource, const char* timestamp);
 
 // struct describing a single resource provider
 struct mjpResourceProvider {
@@ -106,6 +109,15 @@ struct mjpPlugin_ {
 
   // called by mjv_updateScene (optional)
   void (*visualize)(const mjModel*m, mjData* d, const mjvOption* opt, mjvScene* scn, int instance);
+
+  // methods specific to actuators (optional)
+
+  // dimension of the actuator state for the plugin (excluding state from actuator's dyntype)
+  int (*actuator_actdim)(const mjModel*m, int instance, int actuator_id);
+
+  // updates the actuator plugin's entries in act_dot
+  // called after native act_dot is computed and before the compute callback
+  void (*actuator_act_dot)(const mjModel* m, mjData* d, int instance);
 
   // methods specific to signed distance fields (optional)
 

@@ -14,15 +14,17 @@
 # ==============================================================================
 """Core non-smooth constraint functions."""
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import jax
 from jax import numpy as jp
 import mujoco
+from mujoco.mjx._src import collision_driver
 from mujoco.mjx._src import math
 from mujoco.mjx._src import support
 # pylint: disable=g-importing-member
 from mujoco.mjx._src.dataclasses import PyTreeNode
+from mujoco.mjx._src.types import ConstraintType
 from mujoco.mjx._src.types import Contact
 from mujoco.mjx._src.types import Data
 from mujoco.mjx._src.types import DisableBit
@@ -31,6 +33,9 @@ from mujoco.mjx._src.types import JointType
 from mujoco.mjx._src.types import Model
 # pylint: enable=g-importing-member
 import numpy as np
+
+
+_CONDIM_EFC_COUNT = {1: 1, 3: 4, 4: 6, 6: 10}
 
 
 class _Efc(PyTreeNode):
@@ -110,7 +115,7 @@ def _instantiate_equality_connect(m: Model, d: Data) -> Optional[_Efc]:
     return j, cpos, jp.repeat(math.norm(cpos), 3)
 
   # concatenate to drop connect grouping dimension
-  j, pos, pos_norm = jax.tree_map(jp.concatenate, fn(data, id1, id2))
+  j, pos, pos_norm = jax.tree_util.tree_map(jp.concatenate, fn(data, id1, id2))
   invweight = m.body_invweight0[id1, 0] + m.body_invweight0[id2, 0]
   invweight = jp.repeat(invweight, 3)
   solref = jp.tile(m.eq_solref[ids], (3, 1))
@@ -163,7 +168,7 @@ def _instantiate_equality_weld(m: Model, d: Data) -> Optional[_Efc]:
     return j, pos, jp.repeat(math.norm(pos), 6)
 
   # concatenate to drop weld grouping dimension
-  j, pos, pos_norm = jax.tree_map(jp.concatenate, fn(data, id1, id2))
+  j, pos, pos_norm = jax.tree_util.tree_map(jp.concatenate, fn(data, id1, id2))
   invweight = m.body_invweight0[id1] + m.body_invweight0[id2]
   invweight = jp.repeat(invweight, 3)
   solref = jp.tile(m.eq_solref[ids], (6, 1))
@@ -276,7 +281,7 @@ def _instantiate_limit_slide_hinge(m: Model, d: Data) -> Optional[_Efc]:
 def _instantiate_contact(m: Model, d: Data) -> Optional[_Efc]:
   """Calculates constraint rows for contacts."""
 
-  if (m.opt.disableflags & DisableBit.CONTACT) or d.ncon == 0:
+  if d.ncon == 0:
     return None
 
   @jax.vmap
@@ -296,7 +301,7 @@ def _instantiate_contact(m: Model, d: Data) -> Optional[_Efc]:
     for diff_tan, friction in zip(diff_con[1:], c.friction[:2]):
       for f in (friction, -friction):
         js.append(diff_con[0] + diff_tan * f)
-        invweights.append((t + f * f * t) * 2 * f * f)
+        invweights.append((t + f * f * t) * 2 * f * f / m.opt.impratio)
 
     active = dist < 0
     j, invweight = jp.stack(js) * active, jp.stack(invweights)
@@ -307,46 +312,59 @@ def _instantiate_contact(m: Model, d: Data) -> Optional[_Efc]:
 
   res = fn(d.contact)
   # remove contact grouping dimension:
-  j, invweight, pos, solref, solimp = jax.tree_map(jp.concatenate, res)
+  j, invweight, pos, solref, solimp = jax.tree_util.tree_map(jp.concatenate, res)
   frictionloss = jp.zeros_like(pos)
 
   return _Efc(j, pos, pos, invweight, solref, solimp, frictionloss)
 
 
-def count_constraints(m: Model, d: Data) -> Tuple[int, int, int, int]:
+def counts(efc_type: np.ndarray) -> Tuple[int, int, int, int]:
   """Returns equality, friction, limit, and contact constraint counts."""
-  if m.opt.disableflags & DisableBit.CONSTRAINT:
-    return 0, 0, 0, 0
-
-  if m.opt.disableflags & DisableBit.EQUALITY:
-    ne = 0
-  else:
-    ne_connect = (m.eq_type == EqType.CONNECT).sum()
-    ne_weld = (m.eq_type == EqType.WELD).sum()
-    ne_joint = (m.eq_type == EqType.JOINT).sum()
-    ne = ne_connect * 3 + ne_weld * 6 + ne_joint
-
-  nf = 0
-
-  if m.opt.disableflags & DisableBit.LIMIT:
-    nl = 0
-  else:
-    nl = int(m.jnt_limited.sum())
-
-  if m.opt.disableflags & DisableBit.CONTACT:
-    nc = 0
-  else:
-    nc = d.ncon * 4
+  ne = (efc_type == ConstraintType.EQUALITY).sum()
+  nf = 0  # no support for friction loss yet
+  nl = (efc_type == ConstraintType.LIMIT_JOINT).sum()
+  nc = (efc_type == ConstraintType.CONTACT_PYRAMIDAL).sum()
 
   return ne, nf, nl, nc
 
 
+def make_efc_type(
+    m: Union[Model, mujoco.MjModel], dim: Optional[np.ndarray] = None
+) -> np.ndarray:
+  """Returns efc_type that outlines the type of each constraint row."""
+  if m.opt.disableflags & DisableBit.CONSTRAINT:
+    return np.empty(0, dtype=int)
+
+  dim = collision_driver.make_condim(m) if dim is None else dim
+  efc_types = []
+
+  if not m.opt.disableflags & DisableBit.EQUALITY:
+    num_rows = (m.eq_type == EqType.CONNECT).sum() * 3
+    num_rows += (m.eq_type == EqType.WELD).sum() * 6
+    num_rows += (m.eq_type == EqType.JOINT).sum()
+    efc_types.extend([ConstraintType.EQUALITY] * num_rows)
+
+  if not m.opt.disableflags & DisableBit.LIMIT:
+    efc_types.extend([ConstraintType.LIMIT_JOINT] * m.jnt_limited.sum())
+
+  if not m.opt.disableflags & DisableBit.CONTACT:
+    num_rows = sum(_CONDIM_EFC_COUNT[d] for d in dim)
+    efc_types.extend([ConstraintType.CONTACT_PYRAMIDAL] * num_rows)
+
+  return np.array(efc_types)
+
+
+def make_efc_address(efc_type: np.ndarray, dim: np.ndarray) -> np.ndarray:
+  """Returns efc_address that maps contacts to constraint row address."""
+  nc = (efc_type == ConstraintType.CONTACT_PYRAMIDAL).sum()
+  nc_start = efc_type.size - nc
+  offsets = np.cumsum([0] + [_CONDIM_EFC_COUNT[d] for d in dim])[:-1]
+
+  return nc_start + offsets
+
+
 def make_constraint(m: Model, d: Data) -> Data:
   """Creates constraint jacobians and other supporting data."""
-
-  ns = sum(count_constraints(m, d)[:-1])
-  # TODO(robotics-simulation): make device_put set nefc/efc_address instead
-  d = d.tree_replace({'contact.efc_address': np.arange(ns, ns + d.ncon * 4, 4)})
 
   if m.opt.disableflags & DisableBit.CONSTRAINT:
     efcs = ()
@@ -364,10 +382,10 @@ def make_constraint(m: Model, d: Data) -> Data:
   if not efcs:
     z = jp.empty(0)
     d = d.replace(efc_J=jp.empty((0, m.nv)))
-    d = d.replace(efc_D=z, efc_aref=z, efc_frictionloss=z, nefc=0)
+    d = d.replace(efc_D=z, efc_aref=z, efc_frictionloss=z)
     return d
 
-  efc = jax.tree_map(lambda *x: jp.concatenate(x), *efcs)
+  efc = jax.tree_util.tree_map(lambda *x: jp.concatenate(x), *efcs)
 
   @jax.vmap
   def fn(efc):
@@ -378,6 +396,6 @@ def make_constraint(m: Model, d: Data) -> Data:
 
   aref, r = fn(efc)
   d = d.replace(efc_J=efc.J, efc_D=1 / r, efc_aref=aref)
-  d = d.replace(efc_frictionloss=efc.frictionloss, nefc=r.shape[0])
+  d = d.replace(efc_frictionloss=efc.frictionloss)
 
   return d

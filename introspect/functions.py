@@ -66,9 +66,9 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Add file to VFS, return 0: success, 1: full, 2: repeated name, -1: failed to load.',  # pylint: disable=line-too-long
      )),
-    ('mj_makeEmptyFileVFS',
+    ('mj_addBufferVFS',
      FunctionDecl(
-         name='mj_makeEmptyFileVFS',
+         name='mj_addBufferVFS',
          return_type=ValueType(name='int'),
          parameters=(
              FunctionParameterDecl(
@@ -78,17 +78,23 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
              FunctionParameterDecl(
-                 name='filename',
+                 name='name',
                  type=PointerType(
                      inner_type=ValueType(name='char', is_const=True),
                  ),
              ),
              FunctionParameterDecl(
-                 name='filesize',
+                 name='buffer',
+                 type=PointerType(
+                     inner_type=ValueType(name='void', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='nbuffer',
                  type=ValueType(name='int'),
              ),
          ),
-         doc='Make empty file in VFS, return 0: success, 1: full, 2: repeated name.',  # pylint: disable=line-too-long
+         doc='Add file to VFS from buffer, return 0: success, 1: full, 2: repeated name, -1: failed to load.',  # pylint: disable=line-too-long
      )),
     ('mj_findFileVFS',
      FunctionDecl(
@@ -143,6 +149,30 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Delete all files from VFS.',
+     )),
+    ('mj_makeEmptyFileVFS',
+     FunctionDecl(
+         name='mj_makeEmptyFileVFS',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='vfs',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjVFS'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='filename',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='filesize',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='deprecated: use mj_copyBufferVFS.',
      )),
     ('mj_loadXML',
      FunctionDecl(
@@ -675,7 +705,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  type=ValueType(name='int'),
              ),
          ),
-         doc='Reset data, set fields from specified keyframe.',
+         doc='Reset data. If 0 <= key < nkey, set fields from specified keyframe.',  # pylint: disable=line-too-long
      )),
     ('mj_markStack',
      FunctionDecl(
@@ -744,7 +774,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='size',
-                 type=ValueType(name='int'),
+                 type=ValueType(name='size_t'),
              ),
          ),
          doc='Allocate array of mjtNums on mjData stack. Call mju_error on stack overflow.',  # pylint: disable=line-too-long
@@ -764,7 +794,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
              FunctionParameterDecl(
                  name='size',
-                 type=ValueType(name='int'),
+                 type=ValueType(name='size_t'),
              ),
          ),
          doc='Allocate array of ints on mjData stack. Call mju_error on stack overflow.',  # pylint: disable=line-too-long
@@ -1155,6 +1185,26 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Runge-Kutta explicit order-N integrator.',
+     )),
+    ('mj_implicit',
+     FunctionDecl(
+         name='mj_implicit',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='d',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjData'),
+                 ),
+             ),
+         ),
+         doc='Implicit-in-velocity integrators.',
      )),
     ('mj_invPosition',
      FunctionDecl(
@@ -2351,6 +2401,36 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Compute translation end-effector Jacobian of point, and rotation Jacobian of axis.',  # pylint: disable=line-too-long
+     )),
+    ('mj_angmomMat',
+     FunctionDecl(
+         name='mj_angmomMat',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='d',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjData'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='mat',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjtNum'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='body',
+                 type=ValueType(name='int'),
+             ),
+         ),
+         doc='Compute subtree angular momentum matrix.',
      )),
     ('mj_name2id',
      FunctionDecl(
@@ -6902,6 +6982,34 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Construct quaternion performing rotation from z-axis to given vector.',  # pylint: disable=line-too-long
      )),
+    ('mju_euler2Quat',
+     FunctionDecl(
+         name='mju_euler2Quat',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='quat',
+                 type=ArrayType(
+                     inner_type=ValueType(name='mjtNum'),
+                     extents=(4,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='euler',
+                 type=ArrayType(
+                     inner_type=ValueType(name='mjtNum', is_const=True),
+                     extents=(3,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='seq',
+                 type=PointerType(
+                     inner_type=ValueType(name='char', is_const=True),
+                 ),
+             ),
+         ),
+         doc="Convert sequence of Euler angles (radians) to quaternion. seq[0,1,2] must be in 'xyzXYZ', lower/upper-case mean intrinsic/extrinsic rotations.",  # pylint: disable=line-too-long
+     )),
     ('mju_mulPose',
      FunctionDecl(
          name='mju_mulPose',
@@ -7348,7 +7456,7 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
                  ),
              ),
          ),
-         doc='Eigenvalue decomposition of symmetric 3x3 matrix.',
+         doc="Eigenvalue decomposition of symmetric 3x3 matrix, mat = eigvec * diag(eigval) * eigvec'.",  # pylint: disable=line-too-long
      )),
     ('mju_boxQP',
      FunctionDecl(

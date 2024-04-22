@@ -14,18 +14,29 @@
 
 #include "test/fixture.h"
 
+#include <array>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <memory>
+#include <limits>
+#include <sstream>
+#include <string>
 #include <string_view>
+
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <absl/base/const_init.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 #include <absl/synchronization/mutex.h>
 #include <mujoco/mjmodel.h>
+#include <mujoco/mjxmacro.h>
 #include <mujoco/mujoco.h>
 
 namespace mujoco {
@@ -107,7 +118,7 @@ mjModel* LoadModelFromPath(const char* model_path) {
   return model;
 }
 
-const std::string GetFileContents(const char* path) {
+std::string GetFileContents(const char* path) {
   std::ifstream ifs;
   ifs.open(path, std::ifstream::in);
   EXPECT_FALSE(ifs.fail());
@@ -116,7 +127,7 @@ const std::string GetFileContents(const char* path) {
   return sstream.str();
 }
 
-const std::string SaveAndReadXml(const mjModel* model) {
+std::string SaveAndReadXml(const mjModel* model) {
   EXPECT_THAT(model, testing::NotNull());
 
   constexpr int kMaxPathLen = 1024;
@@ -162,6 +173,187 @@ std::vector<mjtNum> GetCtrlNoise(const mjModel* m, int nsteps,
     }
   }
   return ctrl;
+}
+
+// The maximum spacing between a normalised floating point number x and an
+// adjacent normalised number is 2 epsilon |x|; a factor 10 is added accounting
+// for losses during non-idempotent operations such as vector normalizations.
+template <typename T>
+auto Compare(T val1, T val2) {
+  using ReturnType =
+      std::conditional_t<std::is_same_v<T, float>, float, double>;
+  ReturnType error;
+  if (mju_abs(val1) <= 1 || mju_abs(val2) <= 1) {
+      // Absolute precision for small numbers
+      error = mju_abs(val1-val2);
+  } else {
+    // Relative precision for larger numbers
+    ReturnType magnitude = mju_abs(val1) + mju_abs(val2);
+    error = mju_abs(val1/magnitude - val2/magnitude) / magnitude;
+  }
+  ReturnType safety_factor = 10;
+  return error < safety_factor * std::numeric_limits<ReturnType>::epsilon()
+             ? 0
+             : error;
+}
+
+mjtNum CompareModel(const mjModel* m1, const mjModel* m2,
+                    std::string& field) {
+  mjtNum dif, maxdif = 0.0;
+
+  // define symbols corresponding to number of columns
+  // (needed in MJMODEL_POINTERS)
+  MJMODEL_POINTERS_PREAMBLE(m1);
+
+  // compare ints
+  #define X(name) \
+    if (m1->name != m2->name) {maxdif = m1->name - m2->name; field = #name;}
+    MJMODEL_INTS
+  #undef X
+  if (maxdif > 0) return maxdif;
+
+  // compare arrays
+  #define X(type, name, nr, nc)                                    \
+    for (int r=0; r < m1->nr; r++)                                 \
+      for (int c=0; c < nc; c++) {                                 \
+        dif = Compare(m1->name[r*nc+c], m2->name[r*nc+c]);  \
+        if (dif > maxdif) { maxdif = dif; field = #name;} }
+    MJMODEL_POINTERS
+  #undef X
+
+  // compare scalars in mjOption
+  #define X(type, name)                                            \
+    dif = Compare(m1->opt.name, m2->opt.name);                     \
+    if (dif > maxdif) {maxdif = dif; field = #name;}
+    MJOPTION_SCALARS
+  #undef X
+
+  // compare arrays in mjOption
+  #define X(name, n)                                             \
+    for (int c=0; c < n; c++) {                                  \
+      dif = Compare(m1->opt.name[c], m2->opt.name[c]);           \
+      if (dif > maxdif) {maxdif = dif; field = #name;} }
+    MJOPTION_VECTORS
+  #undef X
+
+  // Return largest difference and field name
+  return maxdif;
+}
+
+MockFilesystem::MockFilesystem(std::string unit_test_name) {
+  prefix_ = absl::StrCat("MjMock.", unit_test_name);
+  dir_ = "/";
+  if (mjp_getResourceProvider(prefix_.c_str()) != nullptr) {
+    return;
+  }
+
+  mjpResourceProvider resourceProvider;
+  mjp_defaultResourceProvider(&resourceProvider);
+  resourceProvider.prefix = prefix_.c_str();
+  resourceProvider.data = (void *) this;
+
+  resourceProvider.open = +[](mjResource* resource) {
+    MockFilesystem *fs = static_cast<MockFilesystem*>(resource->provider->data);
+    std::string filename = fs->StripPrefix(resource->name);
+    return fs->FileExists(filename) ? 1 : 0;
+  };
+
+  resourceProvider.read =+[](mjResource* resource, const void** buffer) {
+    MockFilesystem *fs = static_cast<MockFilesystem*>(resource->provider->data);
+    std::string filename = fs->StripPrefix(resource->name);
+    return (int) fs->GetFile(filename, (const unsigned char**) buffer);
+  };
+
+  resourceProvider.getdir = +[](mjResource* resource, const char** dir,
+                                int* ndir) {
+    MockFilesystem *fs = static_cast<MockFilesystem*>(resource->provider->data);
+    *dir = resource->name;
+
+    // find last directory path separator
+    int length = fs->Prefix().size() + 1;
+    for (int i = length; resource->name[i]; ++i) {
+     if (resource->name[i] == '/' || resource->name[i] == '\\') {
+        length = i + 1;
+      }
+    }
+    *ndir = length;
+  };
+
+  resourceProvider.close = +[](mjResource* resource) {};
+  mjp_registerResourceProvider(&resourceProvider);
+}
+
+bool MockFilesystem::AddFile(std::string filename, const unsigned char* data,
+                         std::size_t ndata) {
+  std::string fullfilename = PathReduce(dir_, filename);
+  auto [it, inserted] = filenames_.insert(fullfilename);
+  if (inserted) {
+    data_[fullfilename] = std::vector(data, data + ndata);
+  }
+  return inserted;
+}
+
+bool MockFilesystem::FileExists(const std::string& filename) {
+  std::string fullfilename = PathReduce(dir_, filename);
+  return filenames_.find(fullfilename) != filenames_.end();
+}
+
+std::size_t MockFilesystem::GetFile(const std::string& filename,
+                                const unsigned char** buffer) const {
+  std::string fullfilename = PathReduce(dir_, filename);
+  auto it = data_.find(fullfilename);
+  if (it == data_.end()) {
+    return 0;
+  }
+  *buffer = it->second.data();
+  return it->second.size();
+}
+
+void MockFilesystem::ChangeDirectory(std::string dir) {
+  if (dir.empty()) {
+    return;
+  }
+
+  dir_ = PathReduce(dir_, dir);
+  if (dir_.back() != '/') {
+    dir_ = absl::StrCat(dir_, "/");
+  }
+}
+
+std::string MockFilesystem::FullPath(const std::string& path) const {
+  return absl::StrCat(prefix_, ":", PathReduce(dir_, path));
+}
+
+std::string MockFilesystem::StripPrefix(const char* path) const {
+  return &path[prefix_.size() + 1];
+}
+
+std::string MockFilesystem::PathReduce(const std::string& current_dir,
+                                       const std::string& path) {
+  std::stringstream stream;
+  if (!path.empty() && path[0] != '/') {
+    stream = std::stringstream(absl::StrCat(current_dir, path));
+  } else {
+    stream = std::stringstream(path);
+  }
+
+  std::string temp;
+  std::vector<std::string> dirs;
+  while (std::getline(stream, temp, '/')) {
+    if (temp == ".." && !dirs.empty()) {
+      dirs.pop_back();
+      continue;
+    }
+
+    if (temp != "." && !temp.empty()) {
+      dirs.push_back(temp);
+    }
+  }
+  if (dirs.empty()) {
+    return "/";
+  }
+
+  return absl::StrJoin(dirs, "/");
 }
 
 }  // namespace mujoco

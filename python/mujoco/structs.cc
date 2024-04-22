@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <ios>
 #include <iostream>
 #include <memory>
@@ -28,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -323,13 +325,11 @@ static raw::MjModel* LoadModelFileImpl(
     });
     mj_defaultVFS(vfs.get());
     for (const auto& asset : assets) {
-      const int vfs_error = InterceptMjErrors(mj_makeEmptyFileVFS)(
-          vfs.get(), asset.name, asset.content_size);
+      const int vfs_error = InterceptMjErrors(mj_addBufferVFS)(
+          vfs.get(), asset.name, asset.content, asset.content_size);
       if (vfs_error) {
         throw py::value_error("assets dict is too big");
       }
-      std::memcpy(vfs->filedata[vfs->nfile - 1],
-                  asset.content, asset.content_size);
     }
   }
 
@@ -630,7 +630,7 @@ MjDataWrapper::MjWrapper(MjDataWrapper&& other)
 #define MJ_M(x) (x)
 #undef X
 
-  contact(MjContactList(ptr_->contact, NConMax(ptr_), &ptr_->ncon,owner_)),
+  contact(MjContactList(ptr_->contact, NConMax(ptr_), &ptr_->ncon, owner_)),
 
 #define X(dtype, var, dim0, dim1) var(InitPyArray(ptr_->var, owner_)),
       MJDATA_VECTOR
@@ -1400,6 +1400,7 @@ PYBIND11_MODULE(_structs, m) {
   X(offwidth);
   X(offheight);
   X(ellipsoidinertia);
+  X(bvactive);
 #undef X
 
   py::class_<raw::MjVisualQuality> mjVisualQuality(mjVisual, "Quality");
@@ -1529,6 +1530,8 @@ PYBIND11_MODULE(_structs, m) {
   X(slidercrank);
   X(crankbroken);
   X(frustum);
+  X(bv);
+  X(bvactive);
 #undef X
 
 #define X(var)                    \
@@ -2223,6 +2226,7 @@ This is useful for example when the MJB is not available as a file on disk.)"));
   X(headlight);
   X(directional);
   X(castshadow);
+  X(bulbradius);
 #undef X
 
 #define X(var) DefinePyArray(mjvLight, #var, &MjvLightWrapper::var)

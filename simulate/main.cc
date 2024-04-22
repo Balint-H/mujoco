@@ -180,8 +180,9 @@ void scanPluginLibraries() {
 #endif
 
 
-  // try to open the ${EXECDIR}/plugin directory
+  // try to open the ${EXECDIR}/MUJOCO_PLUGIN_DIR directory
   // ${EXECDIR} is the directory containing the simulate binary itself
+  // MUJOCO_PLUGIN_DIR is the MUJOCO_PLUGIN_DIR preprocessor macro
   const std::string executable_dir = getExecutableDir();
   if (executable_dir.empty()) {
     return;
@@ -267,6 +268,9 @@ void PhysicsLoop(mj::Simulate& sim) {
       if (dnew) {
         sim.Load(mnew, dnew, sim.dropfilename);
 
+        // lock the sim mutex
+        const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+
         mj_deleteData(d);
         mj_deleteModel(m);
 
@@ -291,6 +295,9 @@ void PhysicsLoop(mj::Simulate& sim) {
       if (mnew) dnew = mj_makeData(mnew);
       if (dnew) {
         sim.Load(mnew, dnew, sim.filename);
+
+        // lock the sim mutex
+        const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
 
         mj_deleteData(d);
         mj_deleteModel(m);
@@ -421,9 +428,18 @@ void PhysicsThread(mj::Simulate* sim, const char* filename) {
   if (filename != nullptr) {
     sim->LoadMessage(filename);
     m = LoadModel(filename, *sim);
-    if (m) d = mj_makeData(m);
+    if (m) {
+      // lock the sim mutex
+      const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
+
+      d = mj_makeData(m);
+    }
     if (d) {
       sim->Load(m, d, filename);
+
+      // lock the sim mutex
+      const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
+
       mj_forward(m, d);
 
       // allocate ctrlnoise

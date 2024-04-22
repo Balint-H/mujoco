@@ -107,11 +107,14 @@ int mj_jacSum(const mjModel* m, mjData* d, int* chain,
               int n, const int* body, const mjtNum* weight,
               const mjtNum point[3], mjtNum* jac, int flg_rot);
 
+// compute subtree angular momentum matrix
+MJAPI void mj_angmomMat(const mjModel* m, mjData* d, mjtNum* mat, int body);
+
 
 //-------------------------- name functions --------------------------------------------------------
 
 // get string hash, see http://www.cse.yorku.ca/~oz/hash.html
-uint64_t mj_hashdjb2(const char* s, uint64_t n);
+uint64_t mj_hashString(const char* s, uint64_t n);
 
 // get id of object with the specified mjtObj type and name, returns -1 if id not found
 MJAPI int mj_name2id(const mjModel* m, int type, const char* name);

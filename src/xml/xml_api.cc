@@ -14,15 +14,19 @@
 
 #include "xml/xml_api.h"
 
+#include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <iostream>
+#include <functional>
+#include <memory>
 #include <mutex>
-#include <random>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <type_traits>
 
-#include "engine/engine_resource.h"
-#include "engine/engine_vfs.h"
-#include "user/user_model.h"
+#include <mujoco/mjmodel.h>
+#include "user/user_api.h"
 #include "xml/xml.h"
 #include "xml/xml_native_reader.h"
 #include "xml/xml_util.h"
@@ -32,41 +36,51 @@
 // global user model class
 class GlobalModel {
  public:
-  GlobalModel();
-  ~GlobalModel();
-  void Clear(void);
+  // deletes current model and takes ownership of model
+  void Set(mjSpec* model = nullptr);
 
-  mjCModel* model;
+  // writes XML to string
+  std::optional<std::string> ToXML(const mjModel* m, char* error,
+                                      int error_sz);
+
+ private:
+  // using raw pointers as GlobalModel needs to be trivially destructible
+  std::mutex* mutex_ = new std::mutex();
+  mjSpec* model_ = nullptr;
 };
 
-
-GlobalModel::GlobalModel() {
-  // clear pointers
-  model = 0;
-}
-
-
-GlobalModel::~GlobalModel() {
-  Clear();
-}
-
-
-void GlobalModel::Clear() {
-  // de-allocate models
-  if (model) {
-    delete model;
+std::optional<std::string> GlobalModel::ToXML(const mjModel* m, char* error,
+                                              int error_sz) {
+  std::lock_guard<std::mutex> lock(*mutex_);
+  if (!model_) {
+    mjCopyError(error, "No XML model loaded", error_sz);
+    return std::nullopt;
   }
+  mjs_copyBack(model_, m);
+  std::string result = mjWriteXML(model_, error, error_sz);
+  if (result.empty()) {
+    return std::nullopt;
+  }
+  return result;
+}
 
-  // clear pointers
-  model = 0;
+void GlobalModel::Set(mjSpec* model) {
+  std::lock_guard<std::mutex> lock(*mutex_);
+  if (model_ != nullptr) {
+    mjs_deleteSpec(model_);
+  }
+  model_ = model;
 }
 
 
-// single instance of global model, protected with mutex
-static GlobalModel themodel;
-static std::mutex themutex;
+// returns a single instance of the global model
+GlobalModel& GetGlobalModel() {
+  static GlobalModel global_model;
 
-
+  // global variables must be trivially destructible
+  static_assert(std::is_trivially_destructible_v<decltype(global_model)>);
+  return global_model;
+}
 
 //---------------------------------- Functions -----------------------------------------------------
 
@@ -76,34 +90,30 @@ static std::mutex themutex;
 mjModel* mj_loadXML(const char* filename, const mjVFS* vfs,
                     char* error, int error_sz) {
 
-  // serialize access to themodel
-  std::lock_guard<std::mutex> lock(themutex);
-
   // parse new model
-  mjCModel* newmodel = mjParseXML(filename, vfs, error, error_sz);
-  if (!newmodel) {
+  std::unique_ptr<mjSpec, std::function<void(mjSpec*)>> model(
+      mjParseXML(filename, vfs, error, error_sz),
+      [](mjSpec* m) { mjs_deleteSpec(m); });
+  if (!model) {
     return nullptr;
   }
 
   // compile new model
-  mjModel* m = newmodel->Compile(vfs);
+  mjModel* m = mjs_compile(model.get(), vfs);
   if (!m) {
-    mjCopyError(error, newmodel->GetError().message, error_sz);
-    delete newmodel;
+    mjCopyError(error, mjs_getError(model.get()), error_sz);
     return nullptr;
   }
 
-  // clear old and assign new
-  themodel.Clear();
-  themodel.model = newmodel;
-
   // handle compile warning
-  if (themodel.model->GetError().warning) {
-    mjCopyError(error, themodel.model->GetError().message, error_sz);
+  if (mjs_isWarning(model.get())) {
+    mjCopyError(error, mjs_getError(model.get()), error_sz);
   } else if (error) {
     error[0] = '\0';
   }
 
+  // clear old and assign new
+  GetGlobalModel().Set(model.release());
   return m;
 }
 
@@ -113,15 +123,7 @@ mjModel* mj_loadXML(const char* filename, const mjVFS* vfs,
 //  returns 1 if successful, 0 otherwise
 //  error can be NULL; otherwise assumed to have size error_sz
 int mj_saveLastXML(const char* filename, const mjModel* m, char* error, int error_sz) {
-  // serialize access to themodel
-  std::lock_guard<std::mutex> lock(themutex);
   FILE *fp = stdout;
-
-  if (!themodel.model) {
-    mjCopyError(error, "No XML model loaded", error_sz);
-    return 0;
-  }
-
   if (filename != nullptr && filename[0] != '\0') {
     fp = fopen(filename, "w");
     if (!fp) {
@@ -130,28 +132,23 @@ int mj_saveLastXML(const char* filename, const mjModel* m, char* error, int erro
     }
   }
 
-  themodel.model->CopyBack(m);
-  std::string result = mjWriteXML(themodel.model, error, error_sz);
-
-  if (!result.empty()) {
-    fprintf(fp, "%s", result.c_str());
+  auto result = GetGlobalModel().ToXML(m, error, error_sz);
+  if (result.has_value()) {
+    fprintf(fp, "%s", result->c_str());
   }
 
   if (fp != stdout) {
     fclose(fp);
   }
 
-  return !result.empty();
+  return result.has_value();
 }
 
 
 
 // free last XML
 void mj_freeLastXML(void) {
-  // serialize access to themodel
-  std::lock_guard<std::mutex> lock(themutex);
-
-  themodel.Clear();
+  GetGlobalModel().Set();
 }
 
 
@@ -159,9 +156,6 @@ void mj_freeLastXML(void) {
 
 // print internal XML schema as plain text or HTML, with style-padding or &nbsp;
 int mj_printSchema(const char* filename, char* buffer, int buffer_sz, int flg_html, int flg_pad) {
-  // serialize access, even though it is not necessary
-  std::lock_guard<std::mutex> lock(themutex);
-
   // print to stringstream
   mjXReader reader;
   std::stringstream str;

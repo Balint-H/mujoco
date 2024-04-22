@@ -19,12 +19,12 @@
 
 
 // this is a C-API
-#if defined(__cplusplus)
+#ifdef __cplusplus
 extern "C" {
 #endif
 
 // header version; should match the library version as returned by mj_version()
-#define mjVERSION_HEADER 302
+#define mjVERSION_HEADER 315
 
 // needed to define size_t, fabs and log10
 #include <stdlib.h>
@@ -82,8 +82,8 @@ MJAPI void mj_defaultVFS(mjVFS* vfs);
 // Add file to VFS, return 0: success, 1: full, 2: repeated name, -1: failed to load.
 MJAPI int mj_addFileVFS(mjVFS* vfs, const char* directory, const char* filename);
 
-// Make empty file in VFS, return 0: success, 1: full, 2: repeated name.
-MJAPI int mj_makeEmptyFileVFS(mjVFS* vfs, const char* filename, int filesize);
+// Add file to VFS from buffer, return 0: success, 1: full, 2: repeated name, -1: failed to load.
+MJAPI int mj_addBufferVFS(mjVFS* vfs, const char* name, const void* buffer, int nbuffer);
 
 // Return file index in VFS, or -1 if not found in VFS.
 MJAPI int mj_findFileVFS(const mjVFS* vfs, const char* filename);
@@ -94,6 +94,8 @@ MJAPI int mj_deleteFileVFS(mjVFS* vfs, const char* filename);
 // Delete all files from VFS.
 MJAPI void mj_deleteVFS(mjVFS* vfs);
 
+// deprecated: use mj_copyBufferVFS.
+MJAPI int mj_makeEmptyFileVFS(mjVFS* vfs, const char* filename, int filesize);
 
 //---------------------------------- Parse and compile ---------------------------------------------
 
@@ -182,8 +184,10 @@ MJAPI void mj_resetData(const mjModel* m, mjData* d);
 // Reset data to defaults, fill everything else with debug_value.
 MJAPI void mj_resetDataDebug(const mjModel* m, mjData* d, unsigned char debug_value);
 
-// Reset data, set fields from specified keyframe.
+// Reset data. If 0 <= key < nkey, set fields from specified keyframe.
 MJAPI void mj_resetDataKeyframe(const mjModel* m, mjData* d, int key);
+
+#ifndef ADDRESS_SANITIZER
 
 // Mark a new frame on the mjData stack.
 MJAPI void mj_markStack(mjData* d);
@@ -192,15 +196,17 @@ MJAPI void mj_markStack(mjData* d);
 // to mj_markStack must no longer be used afterwards.
 MJAPI void mj_freeStack(mjData* d);
 
+#endif  // ADDRESS_SANITIZER
+
 // Allocate a number of bytes on mjData stack at a specific alignment.
 // Call mju_error on stack overflow.
 MJAPI void* mj_stackAllocByte(mjData* d, size_t bytes, size_t alignment);
 
 // Allocate array of mjtNums on mjData stack. Call mju_error on stack overflow.
-MJAPI mjtNum* mj_stackAllocNum(mjData* d, int size);
+MJAPI mjtNum* mj_stackAllocNum(mjData* d, size_t size);
 
 // Allocate array of ints on mjData stack. Call mju_error on stack overflow.
-MJAPI int* mj_stackAllocInt(mjData* d, int size);
+MJAPI int* mj_stackAllocInt(mjData* d, size_t size);
 
 // Free memory allocation in mjData.
 MJAPI void mj_deleteData(mjData* d);
@@ -263,6 +269,9 @@ MJAPI void mj_Euler(const mjModel* m, mjData* d);
 
 // Runge-Kutta explicit order-N integrator.
 MJAPI void mj_RungeKutta(const mjModel* m, mjData* d, int N);
+
+// Implicit-in-velocity integrators.
+MJAPI void mj_implicit(const mjModel* m, mjData* d);
 
 // Run position-dependent computations in inverse dynamics.
 MJAPI void mj_invPosition(const mjModel* m, mjData* d);
@@ -420,6 +429,9 @@ MJAPI void mj_jacSite(const mjModel* m, const mjData* d, mjtNum* jacp, mjtNum* j
 // Compute translation end-effector Jacobian of point, and rotation Jacobian of axis.
 MJAPI void mj_jacPointAxis(const mjModel* m, mjData* d, mjtNum* jacPoint, mjtNum* jacAxis,
                            const mjtNum point[3], const mjtNum axis[3], int body);
+
+// Compute subtree angular momentum matrix.
+MJAPI void mj_angmomMat(const mjModel* m, mjData* d, mjtNum* mat, int body);
 
 // Get id of object with the specified mjtObj type and name, returns -1 if id not found.
 MJAPI int mj_name2id(const mjModel* m, int type, const char* name);
@@ -1021,7 +1033,6 @@ MJAPI void mju_transformSpatial(mjtNum res[6], const mjtNum vec[6], int flg_forc
                                 const mjtNum newpos[3], const mjtNum oldpos[3],
                                 const mjtNum rotnew2old[9]);
 
-
 //---------------------------------- Quaternions ---------------------------------------------------
 
 // Rotate vector by quaternion.
@@ -1060,6 +1071,9 @@ MJAPI void mju_quatIntegrate(mjtNum quat[4], const mjtNum vel[3], mjtNum scale);
 // Construct quaternion performing rotation from z-axis to given vector.
 MJAPI void mju_quatZ2Vec(mjtNum quat[4], const mjtNum vec[3]);
 
+// Convert sequence of Euler angles (radians) to quaternion.
+// seq[0,1,2] must be in 'xyzXYZ', lower/upper-case mean intrinsic/extrinsic rotations.
+MJAPI void mju_euler2Quat(mjtNum quat[4], const mjtNum euler[3], const char* seq);
 
 //---------------------------------- Poses ---------------------------------------------------------
 
@@ -1115,7 +1129,7 @@ MJAPI void mju_bandMulMatVec(mjtNum* res, const mjtNum* mat, const mjtNum* vec,
 // Address of diagonal element i in band-dense matrix representation.
 MJAPI int mju_bandDiag(int i, int ntotal, int nband, int ndense);
 
-// Eigenvalue decomposition of symmetric 3x3 matrix.
+// Eigenvalue decomposition of symmetric 3x3 matrix, mat = eigvec * diag(eigval) * eigvec'.
 MJAPI int mju_eig3(mjtNum eigval[3], mjtNum eigvec[9], mjtNum quat[4], const mjtNum mat[9]);
 
 // minimize 0.5*x'*H*x + x'*g  s.t. lower <= x <= upper, return rank or -1 if failed
@@ -1335,8 +1349,36 @@ MJAPI void mju_defaultTask(mjTask* task);
 // Wait for a task to complete.
 MJAPI void mju_taskJoin(mjTask* task);
 
+//---------------------- Sanitizer instrumentation helpers -----------------------------------------
+//
+// Most MuJoCo users can ignore these functions, the following comments are aimed primarily at
+// MuJoCo developers.
+//
+// When built and run under address sanitizer (asan), mj_markStack and mj_freeStack are instrumented
+// to detect leakage of mjData stack frames. When the compiler inlines several callees that call
+// into mark/free into the same function, this instrumentation requires that the compiler retains
+// separate mark/free calls for each original callee. The memory-clobbered asm blocks act as a
+// barrier to prevent mark/free calls from being combined under optimization.
 
-#if defined(__cplusplus)
+#ifdef ADDRESS_SANITIZER
+
+void mj__markStack(mjData*) __attribute__((noinline));
+static inline void mj_markStack(mjData* d) __attribute__((always_inline)) {
+  asm volatile("" ::: "memory");
+  mj__markStack(d);
+  asm volatile("" ::: "memory");
+}
+
+void mj__freeStack(mjData*) __attribute__((noinline));
+static inline void mj_freeStack(mjData* d) __attribute__((always_inline)) {
+  asm volatile("" ::: "memory");
+  mj__freeStack(d);
+  asm volatile("" ::: "memory");
+}
+
+#endif  // ADDRESS_SANITIZER
+
+#ifdef __cplusplus
 }
 #endif
 

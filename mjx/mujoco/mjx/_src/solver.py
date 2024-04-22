@@ -14,13 +14,12 @@
 # ==============================================================================
 """Constraint solvers."""
 
-from typing import Optional
-
 import jax
 from jax import numpy as jp
 import mujoco
 from mujoco.mjx._src import math
 from mujoco.mjx._src import smooth
+from mujoco.mjx._src import support
 # pylint: disable=g-importing-member
 from mujoco.mjx._src.dataclasses import PyTreeNode
 from mujoco.mjx._src.types import Data
@@ -38,7 +37,6 @@ class _Context(PyTreeNode):
     qfrc_constraint: constraint force (from Data)     (nv,)
     Jaref: Jac*qacc - aref                            (nefc,)
     efc_force: constraint force in constraint space   (nefc,)
-    M: dense mass matrix, populated for nv < 100      (nv, nv)
     Ma: M*qacc                                        (nv,)
     grad: gradient of master cost                     (nv,)
     Mgrad: M / grad                                   (nv,)
@@ -53,7 +51,6 @@ class _Context(PyTreeNode):
   qfrc_constraint: jax.Array
   Jaref: jax.Array  # pylint: disable=invalid-name
   efc_force: jax.Array
-  M: Optional[jax.Array]
   Ma: jax.Array  # pylint: disable=invalid-name
   grad: jax.Array
   Mgrad: jax.Array  # pylint: disable=invalid-name
@@ -67,15 +64,13 @@ class _Context(PyTreeNode):
   def create(cls, m: Model, d: Data, grad: bool = True) -> '_Context':
     jaref = d.efc_J @ d.qacc - d.efc_aref
     # TODO(robotics-team): determine nv at which sparse mul is faster
-    M = smooth.dense_m(m, d) if m.nv < 100 else None  # pylint: disable=invalid-name
-    ma = smooth.mul_m(m, d, d.qacc) if M is None else M @ d.qacc
-    nv_0 = jp.zeros((m.nv,))
+    ma = support.mul_m(m, d, d.qacc)
+    nv_0 = jp.zeros(m.nv)
     ctx = _Context(
         qacc=d.qacc,
         qfrc_constraint=d.qfrc_constraint,
         Jaref=jaref,
-        efc_force=jp.zeros(d.nefc),
-        M=M,
+        efc_force=d.efc_force,
         Ma=ma,
         grad=nv_0,
         Mgrad=nv_0,
@@ -85,7 +80,7 @@ class _Context(PyTreeNode):
         prev_cost=0.0,
         solver_niter=0,
     )
-    ctx = _update_constraint(m, d, ctx)
+    ctx = _update_constraint(d, ctx)
     if grad:
       ctx = _update_gradient(m, d, ctx)
       ctx = ctx.replace(search=-ctx.Mgrad)  # start with preconditioned gradient
@@ -128,7 +123,7 @@ class _LSPoint(PyTreeNode):
 
     cost = alpha * alpha * quad_total[2] + alpha * quad_total[1] + quad_total[0]
     deriv_0 = 2 * alpha * quad_total[2] + quad_total[1]
-    deriv_1 = 2 * quad_total[2]
+    deriv_1 = 2 * quad_total[2] + (quad_total[2] == 0) * mujoco.mjMINVAL
     return _LSPoint(alpha=alpha, cost=cost, deriv_0=deriv_0, deriv_1=deriv_1)
 
 
@@ -164,21 +159,18 @@ def _while_loop_scan(cond_fun, body_fun, init_val, max_iter):
   return jax.lax.scan(_fun, init, None, length=max_iter)[0][0]
 
 
-def _update_constraint(m: Model, d: Data, ctx: _Context) -> _Context:
+def _update_constraint(d: Data, ctx: _Context) -> _Context:
   """Updates constraint force and resulting cost given latst solver iteration.
 
   Corresponds to CGupdateConstraint in mujoco/src/engine/engine_solver.c
 
   Args:
-    m: model defining constraints
     d: data which contains latest qacc and smooth terms
     ctx: current solver context
 
   Returns:
     context with new constraint force and costs
   """
-  del m
-
   # TODO(robotics-team): add friction constraints
 
   # only count active constraints
@@ -221,13 +213,13 @@ def _update_gradient(m: Model, d: Data, ctx: _Context) -> _Context:
   if m.opt.solver == SolverType.CG:
     mgrad = smooth.solve_m(m, d, grad)
   elif m.opt.solver == SolverType.NEWTON:
-    active = (ctx.Jaref < 0).at[:d.ne + d.nf].set(True)
+    active = (ctx.Jaref < 0).at[: d.ne + d.nf].set(True)
     h = (d.efc_J.T * d.efc_D * active) @ d.efc_J
-    h = smooth.dense_m(m, d) + h
+    h = support.full_m(m, d) + h
     h_ = jax.scipy.linalg.cho_factor(h)
     mgrad = jax.scipy.linalg.cho_solve(h_, grad)
   else:
-    raise NotImplementedError(f"unsupported solver type: {m.opt.solver}")
+    raise NotImplementedError(f'unsupported solver type: {m.opt.solver}')
 
   ctx = ctx.replace(grad=grad, Mgrad=mgrad)
 
@@ -253,7 +245,7 @@ def _linesearch(m: Model, d: Data, ctx: _Context) -> _Context:
   gtol = m.opt.tolerance * m.opt.ls_tolerance * smag
 
   # compute Mv, Jv
-  mv = smooth.mul_m(m, d, ctx.search) if ctx.M is None else ctx.M @ ctx.search
+  mv = support.mul_m(m, d, ctx.search)
   jv = d.efc_J @ ctx.search
 
   # prepare quadratics
@@ -265,7 +257,7 @@ def _linesearch(m: Model, d: Data, ctx: _Context) -> _Context:
   quad = jp.stack((0.5 * ctx.Jaref * ctx.Jaref, jv * ctx.Jaref, 0.5 * jv * jv))
   quad = (quad * d.efc_D).T
 
-  point_fn = lambda alpha: _LSPoint.create(d, ctx, alpha, jv, quad, quad_gauss)
+  point_fn = lambda a: _LSPoint.create(d, ctx, a, jv, quad, quad_gauss)
 
   def cond(ctx: _LSContext) -> jax.Array:
     done = ctx.ls_iter >= m.opt.ls_iterations
@@ -286,14 +278,14 @@ def _linesearch(m: Model, d: Data, ctx: _Context) -> _Context:
     # 1) they are not correctly at a bracket boundary (e.g. lo.deriv_0 > 0), OR
     # 2) if moving to next or mid narrows the bracket
     swap_lo_next = (lo.deriv_0 > 0) | (lo.deriv_0 < lo_next.deriv_0)
-    lo = jax.tree_map(lambda x, y: jp.where(swap_lo_next, y, x), lo, lo_next)
+    lo = jax.tree_util.tree_map(lambda x, y: jp.where(swap_lo_next, y, x), lo, lo_next)
     swap_lo_mid = (mid.deriv_0 < 0) & (lo.deriv_0 < mid.deriv_0)
-    lo = jax.tree_map(lambda x, y: jp.where(swap_lo_mid, y, x), lo, mid)
+    lo = jax.tree_util.tree_map(lambda x, y: jp.where(swap_lo_mid, y, x), lo, mid)
 
     swap_hi_next = (hi.deriv_0 < 0) | (hi.deriv_0 > hi_next.deriv_0)
-    hi = jax.tree_map(lambda x, y: jp.where(swap_hi_next, y, x), hi, hi_next)
+    hi = jax.tree_util.tree_map(lambda x, y: jp.where(swap_hi_next, y, x), hi, hi_next)
     swap_hi_mid = (mid.deriv_0 > 0) & (hi.deriv_0 > mid.deriv_0)
-    hi = jax.tree_map(lambda x, y: jp.where(swap_hi_mid, y, x), hi, mid)
+    hi = jax.tree_util.tree_map(lambda x, y: jp.where(swap_hi_mid, y, x), hi, mid)
 
     swap = swap_lo_next | swap_lo_mid | swap_hi_next | swap_hi_mid
 
@@ -305,8 +297,8 @@ def _linesearch(m: Model, d: Data, ctx: _Context) -> _Context:
   p0 = point_fn(jp.array(0.0))
   lo = point_fn(p0.alpha - p0.deriv_0 / p0.deriv_1)
   lesser_fn = lambda x, y: jp.where(lo.deriv_0 < p0.deriv_0, x, y)
-  hi = jax.tree_map(lesser_fn, p0, lo)
-  lo = jax.tree_map(lesser_fn, lo, p0)
+  hi = jax.tree_util.tree_map(lesser_fn, p0, lo)
+  lo = jax.tree_util.tree_map(lesser_fn, lo, p0)
   ls_ctx = _LSContext(lo=lo, hi=hi, swap=jp.array(True), ls_iter=0)
   ls_ctx = _while_loop_scan(cond, body, ls_ctx, m.opt.ls_iterations)
 
@@ -339,7 +331,7 @@ def solve(m: Model, d: Data) -> Data:
   def body(ctx: _Context) -> _Context:
     ctx = _linesearch(m, d, ctx)
     prev_grad, prev_Mgrad = ctx.grad, ctx.Mgrad  # pylint: disable=invalid-name
-    ctx = _update_constraint(m, d, ctx)
+    ctx = _update_constraint(d, ctx)
     ctx = _update_gradient(m, d, ctx)
 
     # polak-ribiere:

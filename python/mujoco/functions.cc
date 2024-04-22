@@ -106,11 +106,11 @@ PYBIND11_MODULE(_functions, pymodule) {
   Def<traits::mj_defaultOption>(pymodule);
   Def<traits::mj_defaultVisual>(pymodule);
   // Skipped: mj_copyModel (have MjModel.__copy__, memory managed by MjModel)
-  DEF_WITH_OMITTED_PY_ARGS(traits::mj_saveModel, "buffer_sz")(
-      pymodule,
-      [](const raw::MjModel* m, const std::optional<std::string>& filename,
+  pymodule.def(
+      "mj_saveModel",
+      [](const MjModelWrapper& m, const std::optional<std::string>& filename = std::nullopt,
          std::optional<
-             Eigen::Ref<Eigen::Vector<std::uint8_t, Eigen::Dynamic>>> buffer) {
+             Eigen::Ref<Eigen::Vector<std::uint8_t, Eigen::Dynamic>>> buffer = std::nullopt) {
         void* buffer_ptr = nullptr;
         int buffer_sz = 0;
         if (buffer.has_value()) {
@@ -118,9 +118,13 @@ PYBIND11_MODULE(_functions, pymodule) {
           buffer_sz = buffer->size();
         }
         return InterceptMjErrors(::mj_saveModel)(
-            m, filename.has_value() ? filename->c_str() : nullptr,
+            m.get(), filename.has_value() ? filename->c_str() : nullptr,
             buffer_ptr, buffer_sz);
-      });
+      },
+      py::arg("m"), py::arg_v("filename", std::nullopt),
+      py::arg_v("buffer", std::nullopt),
+      py::doc(traits::mj_saveModel::doc),
+      py::call_guard<py::gil_scoped_release>());
   // Skipped: mj_loadModel (have MjModel.from_binary_path)
   // Skipped: mj_deleteModel (have MjModel.__del__)
   Def<traits::mj_sizeModel>(pymodule);
@@ -185,6 +189,7 @@ PYBIND11_MODULE(_functions, pymodule) {
   Def<traits::mj_fwdConstraint>(pymodule);
   Def<traits::mj_Euler>(pymodule);
   Def<traits::mj_RungeKutta>(pymodule);
+  Def<traits::mj_implicit>(pymodule);
   Def<traits::mj_invPosition>(pymodule);
   Def<traits::mj_invVelocity>(pymodule);
   Def<traits::mj_invConstraint>(pymodule);
@@ -442,6 +447,14 @@ PYBIND11_MODULE(_functions, pymodule) {
             m, d, jacp.has_value() ? jacp->data() : nullptr,
             jacr.has_value() ? jacr->data() : nullptr,
             &(*point)[0], &(*axis)[0], body);
+      });
+  Def<traits::mj_angmomMat>(
+      pymodule, [](const raw::MjModel* m, raw::MjData* d,
+                   Eigen::Ref<EigenArrayXX> mat, int body) {
+        if (mat.rows() != 3 || mat.cols() != m->nv) {
+          throw py::type_error("mat should be of shape (3, nv)");
+        }
+        return InterceptMjErrors(::mj_angmomMat)(m, d, mat.data(), body);
       });
   Def<traits::mj_name2id>(pymodule);
   Def<traits::mj_id2name>(pymodule);
@@ -986,6 +999,7 @@ PYBIND11_MODULE(_functions, pymodule) {
   Def<traits::mju_derivQuat>(pymodule);
   Def<traits::mju_quatIntegrate>(pymodule);
   Def<traits::mju_quatZ2Vec>(pymodule);
+  Def<traits::mju_euler2Quat>(pymodule);
 
   // Poses
   Def<traits::mju_mulPose>(pymodule);
@@ -1352,7 +1366,28 @@ PYBIND11_MODULE(_functions, pymodule) {
             DsDa.has_value() ? DsDa->data() : nullptr,
             DmDq.has_value() ? DmDq->data() : nullptr);
       });
-  Def<traits::mjd_subQuat>(pymodule);
+  Def<traits::mjd_subQuat>(
+      pymodule,
+      [](Eigen::Ref<const EigenVectorX> qa, Eigen::Ref<const EigenVectorX> qb,
+         std::optional<Eigen::Ref<EigenArrayXX>> Da,
+         std::optional<Eigen::Ref<EigenArrayXX>> Db) {
+        if (qa.size() != 4) {
+          throw py::type_error("qa must have size 4");
+        }
+        if (qb.size() != 4) {
+          throw py::type_error("qb must have size 4");
+        }
+        if (Da.has_value() && Da->size() != 9) {
+          throw py::type_error("Da must have size 9");
+        }
+        if (Db.has_value() && Db->size() != 9) {
+          throw py::type_error("Db must have size 9");
+        }
+        return InterceptMjErrors(::mjd_subQuat)(
+            qa.data(), qb.data(),
+            Da.has_value() ? Da->data() : nullptr,
+            Db.has_value() ? Db->data() : nullptr);
+      });
   Def<traits::mjd_quatIntegrate>(pymodule);
 
   pymodule.def(

@@ -19,9 +19,7 @@
 #include <string>
 
 #include "tinyxml2.h"
-#include <mujoco/mjmodel.h>
-#include "user/user_model.h"
-#include "user/user_objects.h"
+#include "user/user_api.h"
 #include "xml/xml_util.h"
 
 
@@ -89,13 +87,13 @@ class mjXBase : public mjXUtil {
   };
 
   // set the model allocated externally
-  void SetModel(mjCModel*);
+  virtual void SetModel(mjSpec*);
 
   // read alternative orientation specification
-  static void ReadAlternative(tinyxml2::XMLElement* elem, mjCAlternative& alt);
+  static int ReadAlternative(tinyxml2::XMLElement* elem, mjsOrientation& alt);
 
  protected:
-  mjCModel* model;                    // internally-allocated mjCModel object
+  mjSpec* model;                    // internally-allocated model
 };
 
 #endif  // MUJOCO_SRC_XML_XML_BASE_H_

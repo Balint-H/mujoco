@@ -14,7 +14,11 @@
 
 // Tests for engine/engine_resource.c
 
+#include <array>
+#include <cstdint>
 #include <cstring>
+#include <ctime>
+#include <string>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -23,6 +27,7 @@
 #include <mujoco/mujoco.h>
 #include "src/engine/engine_plugin.h"
 #include "src/engine/engine_resource.h"
+#include "src/engine/engine_util_misc.h"
 #include "test/fixture.h"
 
 namespace mujoco {
@@ -228,7 +233,7 @@ TEST_F(ResourceTest, GeneralTest) {
   EXPECT_GT(i, 0);
 
   // open resource
-  mjResource* resource = mju_openResource("str:file");
+  mjResource* resource = mju_openResource("str:file", nullptr, 0);
   ASSERT_THAT(resource,  NotNull());
 
   const char* buffer = NULL;
@@ -239,7 +244,7 @@ TEST_F(ResourceTest, GeneralTest) {
   mju_closeResource(resource);
 }
 
-TEST_F(ResourceTest, GeneralTestFailure) {
+TEST_F(ResourceTest, GeneralFailureTest) {
   mjpResourceProvider provider = {
     "str", open_str, read_str, close_str
   };
@@ -248,19 +253,14 @@ TEST_F(ResourceTest, GeneralTestFailure) {
   int i = mjp_registerResourceProvider(&provider);
   EXPECT_GT(i, 0);
 
-
-  // install warning handler
-  static char warning[1024];
-  warning[0] = '\0';
-  mju_user_warning = [](const char* msg) {
-    util::strcpy_arr(warning, msg);
-  };
+  static std::array<char, 1024> error;
 
   // open resource
-  mjResource* resource = mju_openResource("str:notfound");
+  mjResource* resource = mju_openResource("str:notfound",
+                                          error.data(), error.size());
   ASSERT_THAT(resource, IsNull());
 
-  EXPECT_THAT(warning, HasSubstr("could not open"));
+  EXPECT_THAT(error.data(), HasSubstr("could not open"));
 }
 
 TEST_F(ResourceTest, NameWithValidPrefix) {
@@ -281,7 +281,7 @@ TEST_F(ResourceTest, NameWithValidPrefix) {
   };
 
   // open resource
-  mjResource* resource = mju_openResource("nop:found");
+  mjResource* resource = mju_openResource("nop:found", nullptr, 0);
   ASSERT_THAT(resource, NotNull());
   mju_closeResource(resource);
 }
@@ -304,7 +304,7 @@ TEST_F(ResourceTest, NameWithUpperCasePrefix) {
   };
 
   // open resource
-  mjResource* resource = mju_openResource("NOP:found");
+  mjResource* resource = mju_openResource("NOP:found", nullptr, 0);
   ASSERT_THAT(resource, NotNull());
   mju_closeResource(resource);
 }
@@ -327,8 +327,37 @@ TEST_F(ResourceTest, NameWithInvalidPrefix) {
   };
 
   // open resource
-  mjResource* resource = mju_openResource("nopfound");
+  mjResource* resource = mju_openResource("nopfound", nullptr, 0);
   ASSERT_THAT(resource, IsNull());
+}
+
+TEST_F(ResourceTest, OSFilesystemTimestamps) {
+  time_t t;
+
+  // some random file
+  const char* const file = "engine/testdata/collision_box/boxbox_deep.xml";
+  const std::string xml_path = GetTestDataFilePath(file);
+
+  mjResource* resource = mju_openResource(xml_path.c_str(), nullptr, 0);
+  mju_decodeBase64((uint8_t*) &t, resource->timestamp);
+
+  // equal timestamps
+  EXPECT_EQ(mju_isModifiedResource(resource, resource->timestamp), 0);
+
+  std::array<char, 512> test_timestamp;
+
+  // older resource timestamp
+  t++;
+  mju_encodeBase64(test_timestamp.data(), (uint8_t*) &t, sizeof(time_t));
+  EXPECT_EQ(mju_isModifiedResource(resource, test_timestamp.data()), -1);
+
+
+  // newer resource timestamp
+  t -= 2;
+  mju_encodeBase64(test_timestamp.data(), (uint8_t*) &t, sizeof(time_t));
+  EXPECT_EQ(mju_isModifiedResource(resource, test_timestamp.data()), 1);
+
+  mju_closeResource(resource);
 }
 
 }  // namespace

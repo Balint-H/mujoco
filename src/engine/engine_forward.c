@@ -243,6 +243,19 @@ static mjtNum nextActivation(const mjModel* m, const mjData* d,
 
 
 
+// clamp vector to range
+static void clampVec(mjtNum* vec, const mjtNum* range, const mjtByte* limited, int n,
+                      const int* index) {
+  for (int i=0; i < n; i++) {
+    int j = index ? index[i] : i;
+    if (limited[i]) {
+      vec[j] = mju_clip(vec[j], range[2*i], range[2*i + 1]);
+    }
+  }
+}
+
+
+
 // (qpos, qvel, ctrl, act) => (qfrc_actuator, actuator_force, act_dot)
 void mj_fwdActuation(const mjModel* m, mjData* d) {
   TM_START;
@@ -262,18 +275,9 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
   // local, clamped copy of ctrl
   mj_markStack(d);
   mjtNum *ctrl = mj_stackAllocNum(d, nu);
-  if (mjDISABLED(mjDSBL_CLAMPCTRL)) {
-    mju_copy(ctrl, d->ctrl, nu);
-  } else {
-    for (int i=0; i < nu; i++) {
-      // clamp ctrl
-      if (m->actuator_ctrllimited[i]) {
-        mjtNum *ctrlrange = m->actuator_ctrlrange + 2*i;
-        ctrl[i] = mju_clip(d->ctrl[i], ctrlrange[0], ctrlrange[1]);
-      } else {
-        ctrl[i] = d->ctrl[i];
-      }
-    }
+  mju_copy(ctrl, d->ctrl, nu);
+  if (!mjDISABLED(mjDSBL_CLAMPCTRL)) {
+    clampVec(ctrl, m->actuator_ctrlrange, m->actuator_ctrllimited, nu, NULL);
   }
 
   // check controls, set all to 0 if any are bad
@@ -287,45 +291,66 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
 
   // act_dot for stateful actuators
   for (int i=0; i < nu; i++) {
-    if (m->actuator_plugin[i] >= 0) {
+    int act_first = m->actuator_actadr[i];
+    if (act_first < 0) {
       continue;
     }
 
-    int j = m->actuator_actadr[i];
-    if (j < 0) {
-      continue;
+    // zero act_dot for actuator plugins
+    if (m->actuator_actnum[i]) {
+      mju_zero(d->act_dot + act_first, m->actuator_actnum[i]);
     }
 
     // extract info
     prm = m->actuator_dynprm + i*mjNDYN;
 
+    // index into the last element in act. For most actuators it's also the
+    // first element, but actuator plugins might store their own state in act.
+    int act_last = act_first + m->actuator_actnum[i] - 1;
+
     // compute act_dot according to dynamics type
     switch ((mjtDyn) m->actuator_dyntype[i]) {
     case mjDYN_INTEGRATOR:          // simple integrator
-      d->act_dot[j] = ctrl[i];
+      d->act_dot[act_last] = ctrl[i];
       break;
 
     case mjDYN_FILTER:              // linear filter: prm = tau
     case mjDYN_FILTEREXACT:
       tau = mju_max(mjMINVAL, prm[0]);
-      d->act_dot[j] = (ctrl[i] - d->act[j]) / tau;
+      d->act_dot[act_last] = (ctrl[i] - d->act[act_last]) / tau;
       break;
 
     case mjDYN_MUSCLE:              // muscle model: prm = (tau_act, tau_deact)
-      d->act_dot[j] = mju_muscleDynamics(ctrl[i], d->act[j], prm);
+      d->act_dot[act_last] = mju_muscleDynamics(
+          ctrl[i], d->act[act_last], prm);
       break;
 
     default:                        // user dynamics
       if (mjcb_act_dyn) {
         if (m->actuator_actnum[i] == 1) {
           // scalar activation dynamics, get act_dot
-          d->act_dot[j] = mjcb_act_dyn(m, d, i);
+          d->act_dot[act_last] = mjcb_act_dyn(m, d, i);
         } else {
           // higher-order dynamics, mjcb_act_dyn writes into act_dot directly
           mjcb_act_dyn(m, d, i);
         }
-      } else {
-        mju_zero(d->act_dot + j, m->actuator_actnum[i]);
+      }
+    }
+  }
+
+  // get act_dot from actuator plugins
+  if (m->nplugin) {
+    const int nslot = mjp_pluginCount();
+    for (int i=0; i < m->nplugin; i++) {
+      const int slot = m->plugin[i];
+      const mjpPlugin* plugin = mjp_getPluginAtSlotUnsafe(slot, nslot);
+      if (!plugin) {
+        mjERROR("invalid plugin slot: %d", slot);
+      }
+      if (plugin->capabilityflags & mjPLUGIN_ACTUATOR) {
+        if (plugin->actuator_act_dot) {
+          plugin->actuator_act_dot(m, d, i);
+        }
       }
     }
   }
@@ -438,25 +463,47 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
   }
 
   // clamp actuator_force
-  for (int i=0; i < nu; i++) {
-    if (m->actuator_forcelimited[i]) {
-      mjtNum *forcerange = m->actuator_forcerange + 2*i;
-      force[i] = mju_clip(force[i], forcerange[0], forcerange[1]);
-    }
-  }
+  clampVec(force, m->actuator_forcerange, m->actuator_forcelimited, nu, NULL);
 
   // qfrc_actuator = moment' * force
   mju_mulMatTVec(d->qfrc_actuator, moment, force, nu, nv);
 
-  // clamp qfrc_actuator
-  int njnt = m->njnt;
-  for (int i=0; i < njnt; i++) {
-    if (m->jnt_actfrclimited[i]) {
-      mjtNum *forcerange = m->jnt_actfrcrange + 2*i;
-      mjtNum *qfrc = d->qfrc_actuator + m->jnt_dofadr[i];
-      qfrc[0] = mju_clip(qfrc[0], forcerange[0], forcerange[1]);
+  // actuator-level gravity compensation
+  if (!mjDISABLED(mjDSBL_GRAVITY) && mju_norm3(m->opt.gravity)) {
+    int njnt = m->njnt;
+    for (int i=0; i < njnt; i++) {
+      // skip if gravcomp added as passive force
+      if (!m->jnt_actgravcomp[i]) {
+        continue;
+      }
+
+      // get number of dofs for this joint
+      int dofnum;
+      switch (m->jnt_type[i]) {
+      case mjJNT_HINGE:
+      case mjJNT_SLIDE:
+        dofnum = 1;
+        break;
+
+      case mjJNT_BALL:
+        dofnum = 3;
+        break;
+
+      case mjJNT_FREE:
+        dofnum = 6;
+        break;
+      }
+
+      // add gravcomp force
+      int dofadr = m->jnt_dofadr[i];
+      for (int j=0; j < dofnum; j++) {
+        d->qfrc_actuator[dofadr+j] += d->qfrc_gravcomp[dofadr+j];
+      }
     }
   }
+
+  // clamp qfrc_actuator to joint-level actuator force limits
+  clampVec(d->qfrc_actuator, m->jnt_actfrcrange, m->jnt_actfrclimited, m->njnt, m->jnt_dofadr);
 
   mj_freeStack(d);
   TM_END(mjTIMER_ACTUATION);
@@ -468,13 +515,13 @@ void mj_fwdActuation(const mjModel* m, mjData* d) {
 void mj_fwdAcceleration(const mjModel* m, mjData* d) {
   int nv = m->nv;
 
-  // qforce = sum of all non-constraint forces
+  // qfrc_smooth = sum of all non-constraint forces
   mju_sub(d->qfrc_smooth, d->qfrc_passive, d->qfrc_bias, nv);    // qfrc_bias is negative
   mju_addTo(d->qfrc_smooth, d->qfrc_applied, nv);
   mju_addTo(d->qfrc_smooth, d->qfrc_actuator, nv);
   mj_xfrcAccumulate(m, d, d->qfrc_smooth);
 
-  // qacc_smooth = M \ qfr_smooth
+  // qacc_smooth = M \ qfrc_smooth
   mj_solveM(m, d, d->qacc_smooth, d->qfrc_smooth, 1);
 }
 
@@ -685,9 +732,10 @@ void mj_fwdConstraint(const mjModel* m, mjData* d) {
 // advance state and time given activation derivatives, acceleration, and optional velocity
 static void mj_advance(const mjModel* m, mjData* d,
                        const mjtNum* act_dot, const mjtNum* qacc, const mjtNum* qvel) {
-  // advance activations and clamp
+  // advance activations
   if (m->na && !mjDISABLED(mjDSBL_ACTUATION)) {
-    for (int i=0; i < m->nu; i++) {
+    int nu = m->nu;
+    for (int i=0; i < nu; i++) {
       int actadr = m->actuator_actadr[i];
       int actadr_end = actadr + m->actuator_actnum[i];
       for (int j=actadr; j < actadr_end; j++) {

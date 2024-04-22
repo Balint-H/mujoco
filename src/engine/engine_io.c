@@ -94,7 +94,7 @@ void mj_defaultLROpt(mjLROpt* opt) {
 
 //------------------------------- mjOption ---------------------------------------------------------
 
-// set default solver paramters
+// set default solver parameters
 void mj_defaultSolRefImp(mjtNum* solref, mjtNum* solimp) {
   if (solref) {
     solref[0] = 0.02;       // timeconst
@@ -194,6 +194,7 @@ void mj_defaultVisual(mjVisual* vis) {
   vis->global.offheight           = 480;
   vis->global.realtime            = 1.0;
   vis->global.ellipsoidinertia    = 0;
+  vis->global.bvactive            = 1;
 
   // rendering quality
   vis->quality.shadowsize         = 4096;
@@ -272,6 +273,8 @@ void mj_defaultVisual(mjVisual* vis) {
   setf4(vis->rgba.slidercrank,      .5, .3, .8, 1.);
   setf4(vis->rgba.crankbroken,      .9, .0, .0, 1.);
   setf4(vis->rgba.frustum,          1., 1., .0, .2);
+  setf4(vis->rgba.bv,               0., 1., .0, .5);
+  setf4(vis->rgba.bvactive,         1., 0., .0, .5);
 }
 
 
@@ -415,6 +418,7 @@ static void mj_setPtrModel(mjModel* m) {
 }
 
 
+
 // increases buffer size without causing integer overflow, returns 0 if
 // operation would cause overflow
 // performs the following operations:
@@ -530,11 +534,15 @@ mjModel* mj_makeModel(
   m->nuser_actuator = nuser_actuator;
   m->nuser_sensor = nuser_sensor;
   m->nnames = nnames;
-  m->nnames_map = mjLOAD_MULTIPLE
-                  * (nbody + njnt + ngeom + nsite + ncam + nlight + nflex + nmesh
-                     + nskin + nhfield + ntex + nmat + npair + nexclude + neq
-                     + ntendon  + nu + nsensor + nnumeric + ntext + ntuple
-                     + nkey + nplugin);
+  long nnames_map = (long)nbody + njnt + ngeom + nsite + ncam + nlight + nflex + nmesh + nskin +
+                    nhfield + ntex + nmat + npair + nexclude + neq + ntendon + nu + nsensor +
+                    nnumeric + ntext + ntuple + nkey + nplugin;
+  if (nnames_map >= INT_MAX / mjLOAD_MULTIPLE) {
+    mju_free(m);
+    mju_warning("Invalid model: size of nnames_map is larger than INT_MAX");
+    return 0;
+  }
+  m->nnames_map = mjLOAD_MULTIPLE * nnames_map;
   m->npaths = npaths;
 
 #define X(name)                                    \
@@ -594,6 +602,8 @@ mjModel* mj_makeModel(
 
   return m;
 }
+
+
 
 // copy mjModel, if dest==NULL create new model
 mjModel* mj_copyModel(mjModel* dest, const mjModel* src) {
@@ -716,8 +726,10 @@ mjModel* mj_loadModel(const char* filename, const mjVFS* vfs) {
   mjResource* r = NULL;
 
   // first try vfs, otherwise try a provider or OS filesystem
-  if ((r = mju_openVfsResource(filename, vfs)) == NULL) {
-    if ((r = mju_openResource(filename)) == NULL) {
+  if (!(r = mju_openVfsResource(filename, vfs))) {
+    char error[1024];
+    if (!(r = mju_openResource(filename, error, 1024))) {
+       mju_warning("%s", error);
       return NULL;
     }
   }
@@ -1094,8 +1106,25 @@ static void mj_setPtrData(const mjModel* m, mjData* d) {
 
 
 
-// allocate and initialize mjData structure
-static mjData* _makeData(const mjModel* m) {
+// initialize plugins, copy into d (required for deletion)
+static void _initPlugin(const mjModel* m, mjData* d) {
+  d->nplugin = m->nplugin;
+  for (int i = 0; i < m->nplugin; ++i) {
+    d->plugin[i] = m->plugin[i];
+    const mjpPlugin* plugin = mjp_getPluginAtSlot(m->plugin[i]);
+    if (plugin->init && plugin->init(m, d, i) < 0) {
+      mju_free(d->buffer);
+      mju_free(d->arena);
+      mju_free(d);
+      mjERROR("plugin->init failed for plugin id %d", i);
+    }
+  }
+}
+
+
+
+// allocate and initialize raw mjData structure
+mjData* mj_makeRawData(const mjModel* m) {
   intptr_t offset = 0;
 
   // allocate mjData
@@ -1138,36 +1167,30 @@ static mjData* _makeData(const mjModel* m) {
     mjERROR("could not allocate mjData arena");
   }
 
-  // set pointers into buffer, reset data
+  // set pointers into buffer
   mj_setPtrData(m, d);
 
-  // copy plugins into d, required for deletion
-  d->nplugin = m->nplugin;
-  for (int i = 0; i < m->nplugin; ++i) {
-    d->plugin[i] = m->plugin[i];
-    const mjpPlugin* plugin = mjp_getPluginAtSlot(m->plugin[i]);
-    if (plugin->init) {
-      if (plugin->init(m, d, i) < 0) {
-        mju_free(d->buffer);
-        mju_free(d->arena);
-        mju_free(d);
-        mjERROR("plugin->init failed for plugin id %d", i);
-      }
-    }
-  }
-
+  // clear threadpool
   d->threadpool = 0;
+
+  // clear nplugin (overwritten by _initPlugin)
+  d->nplugin = 0;
 
   return d;
 }
 
+
+
+// allocate and initialize mjData structure
 mjData* mj_makeData(const mjModel* m) {
-  mjData* d = _makeData(m);
+  mjData* d = mj_makeRawData(m);
   if (d) {
+    _initPlugin(m, d);
     mj_resetData(m, d);
   }
   return d;
 }
+
 
 
 // copy mjData, if dest==NULL create new data
@@ -1177,7 +1200,8 @@ mjData* mj_copyData(mjData* dest, const mjModel* m, const mjData* src) {
 
   // allocate new data if needed
   if (!dest) {
-    dest = _makeData(m);
+    dest = mj_makeRawData(m);
+    _initPlugin(m, dest);
   }
 
   // check sizes
@@ -1252,6 +1276,7 @@ mjData* mj_copyData(mjData* dest, const mjModel* m, const mjData* src) {
 }
 
 
+
 static void maybe_lock_alloc_mutex(mjData* d) {
   if (d->threadpool != 0) {
     mju_threadPoolLockAllocMutex((mjThreadPool*)d->threadpool);
@@ -1263,7 +1288,6 @@ static void maybe_unlock_alloc_mutex(mjData* d) {
     mju_threadPoolUnlockAllocMutex((mjThreadPool*)d->threadpool);
   }
 }
-
 
 // allocate memory from the mjData arena
 void* mj_arenaAllocByte(mjData* d, size_t bytes, size_t alignment) {
@@ -1366,6 +1390,7 @@ static inline void* stackallocinternal(mjData* d, mjStackInfo* stack_info, size_
 }
 
 
+
 static inline mjStackInfo get_stack_info_from_data(mjData* d) {
   mjStackInfo stack_info;
   stack_info.bottom = (uintptr_t)d->arena + (uintptr_t)d->narena;
@@ -1375,6 +1400,7 @@ static inline mjStackInfo get_stack_info_from_data(mjData* d) {
 
   return stack_info;
 }
+
 
 
 // internal: allocate size bytes in mjData
@@ -1396,6 +1422,7 @@ static inline void* stackalloc(mjData* d, size_t size, size_t alignment) {
 }
 
 
+
 // mjStackInfo mark stack frame, inline so ASAN errors point to correct code unit
 #ifdef ADDRESS_SANITIZER
 __attribute__((always_inline))
@@ -1414,11 +1441,14 @@ static inline void markstackinternal(mjData* d, mjStackInfo* stack_info) {
 }
 
 
+
 // mjData mark stack frame
-#ifdef ADDRESS_SANITIZER
-__attribute__((noinline))
+#ifndef ADDRESS_SANITIZER
+void mj_markStack(mjData* d)
+#else
+void mj__markStack(mjData* d)
 #endif
-void mj_markStack(mjData* d) {
+{
   if (!d->threadpool) {
     mjStackInfo stack_info = get_stack_info_from_data(d);
     markstackinternal(d, &stack_info);
@@ -1432,6 +1462,8 @@ void mj_markStack(mjData* d) {
   markstackinternal(d, stack_info);
 }
 
+
+
 #ifdef ADDRESS_SANITIZER
 __attribute__((always_inline))
 #endif
@@ -1443,15 +1475,10 @@ static inline void freestackinternal(mjStackInfo* stack_info) {
   mjStackFrame* s = (mjStackFrame*) stack_info->stack_base;
 #ifdef ADDRESS_SANITIZER
   // raise an error if caller function name doesn't match the most recent caller of mj_markStack
-  if (!_mj_comparePcFuncName(s->pc, __sanitizer_return_address())) {
-    #define mjSYMBOLIZELEN 256
-    char dbginfo[mjSYMBOLIZELEN];
-    __sanitizer_symbolize_pc(
-      s->pc, "mj_markStack %F at %S has no corresponding mj_freeStack",
-      dbginfo, sizeof(dbginfo));
-    dbginfo[mjSYMBOLIZELEN - 1] = '\0';
-    mjERROR("%s", dbginfo);
-    #undef mjSYMBOLIZELEN
+  if (!mj__comparePcFuncName(s->pc, __sanitizer_return_address())) {
+    mjERROR("mj_markStack %s has no corresponding mj_freeStack (detected %s)",
+            mj__getPcDebugInfo(s->pc),
+            mj__getPcDebugInfo(__sanitizer_return_address()));
   }
 #endif
 
@@ -1466,11 +1493,14 @@ static inline void freestackinternal(mjStackInfo* stack_info) {
 }
 
 
+
 // mjData free stack frame
-#ifdef ADDRESS_SANITIZER
-__attribute__((noinline))
+#ifndef ADDRESS_SANITIZER
+void mj_freeStack(mjData* d)
+#else
+void mj__freeStack(mjData* d)
 #endif
-void mj_freeStack(mjData* d) {
+{
   if (!d->threadpool) {
     mjStackInfo stack_info = get_stack_info_from_data(d);
     freestackinternal(&stack_info);
@@ -1484,15 +1514,30 @@ void mj_freeStack(mjData* d) {
   freestackinternal(stack_info);
 }
 
+
+
+// allocate bytes on the stack
 void* mj_stackAllocByte(mjData* d, size_t bytes, size_t alignment) {
   return stackalloc(d, bytes, alignment);
 }
 
-mjtNum* mj_stackAllocNum(mjData* d, int size) {
+
+
+// allocate mjtNums on the stack
+mjtNum* mj_stackAllocNum(mjData* d, size_t size) {
+  if (mjUNLIKELY(size >= SIZE_MAX / sizeof(mjtNum))) {
+    mjERROR("requested size is too large.");
+  }
   return (mjtNum*) stackalloc(d, size * sizeof(mjtNum), _Alignof(mjtNum));
 }
 
-int* mj_stackAllocInt(mjData* d, int size) {
+
+
+// allocate ints on the stack
+int* mj_stackAllocInt(mjData* d, size_t size) {
+  if (mjUNLIKELY(size >= SIZE_MAX / sizeof(int))) {
+    mjERROR("requested size is too large.");
+  }
   return (int*) stackalloc(d, size * sizeof(int), _Alignof(int));
 }
 
@@ -1501,10 +1546,14 @@ int* mj_stackAllocInt(mjData* d, int size) {
 // clear data, set defaults
 static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   //------------------------------ save plugin state and data
-  mjtNum* plugin_state = mju_malloc(sizeof(mjtNum) * m->npluginstate);
-  memcpy(plugin_state, d->plugin_state, sizeof(mjtNum) * m->npluginstate);
-  uintptr_t* plugindata = mju_malloc(sizeof(uintptr_t) * m->nplugin);
-  memcpy(plugindata, d->plugin_data, sizeof(uintptr_t) * m->nplugin);
+  mjtNum* plugin_state;
+  uintptr_t* plugindata;
+  if (d->nplugin) {
+    plugin_state = mju_malloc(sizeof(mjtNum) * m->npluginstate);
+    memcpy(plugin_state, d->plugin_state, sizeof(mjtNum) * m->npluginstate);
+    plugindata = mju_malloc(sizeof(uintptr_t) * m->nplugin);
+    memcpy(plugindata, d->plugin_data, sizeof(uintptr_t) * m->nplugin);
+  }
 
   //------------------------------ clear header
 
@@ -1533,7 +1582,7 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
 
   // clear memory utilization stats
   d->maxuse_stack = 0;
-  mju_zeroSizeT(d->maxuse_threadstack, mjMAXTHREADS);
+  mju_zeroSizeT(d->maxuse_threadstack, mjMAXTHREAD);
   d->maxuse_arena = 0;
   d->maxuse_con = 0;
   d->maxuse_efc = 0;
@@ -1627,18 +1676,20 @@ static void _resetData(const mjModel* m, mjData* d, unsigned char debug_value) {
   }
 
   // restore pluginstate and plugindata
-  memcpy(d->plugin_state, plugin_state, sizeof(mjtNum) * m->npluginstate);
-  mju_free(plugin_state);
-  memcpy(d->plugin_data, plugindata, sizeof(uintptr_t) * m->nplugin);
-  mju_free(plugindata);
+  if (d->nplugin) {
+    memcpy(d->plugin_state, plugin_state, sizeof(mjtNum) * m->npluginstate);
+    mju_free(plugin_state);
+    memcpy(d->plugin_data, plugindata, sizeof(uintptr_t) * m->nplugin);
+    mju_free(plugindata);
 
-  // restore the plugin array back into d and reset the instances
-  for (int i = 0; i < m->nplugin; ++i) {
-    d->plugin[i] = m->plugin[i];
-    const mjpPlugin* plugin = mjp_getPluginAtSlot(m->plugin[i]);
-    if (plugin->reset) {
-      plugin->reset(m, &d->plugin_state[m->plugin_stateadr[i]],
-                    (void*)(d->plugin_data[i]), i);
+    // restore the plugin array back into d and reset the instances
+    for (int i = 0; i < m->nplugin; ++i) {
+      d->plugin[i] = m->plugin[i];
+      const mjpPlugin* plugin = mjp_getPluginAtSlot(m->plugin[i]);
+      if (plugin->reset) {
+        plugin->reset(m, &d->plugin_state[m->plugin_stateadr[i]],
+                      (void*)(d->plugin_data[i]), i);
+      }
     }
   }
 }
@@ -1659,7 +1710,7 @@ void mj_resetDataDebug(const mjModel* m, mjData* d, unsigned char debug_value) {
 
 
 
-// reset data, set fields from specified keyframe
+// Reset data. If 0 <= key < nkey, set fields from specified keyframe.
 void mj_resetDataKeyframe(const mjModel* m, mjData* d, int key) {
   _resetData(m, d, 0);
 
@@ -1697,6 +1748,7 @@ void mj_deleteData(mjData* d) {
     mju_free(d);
   }
 }
+
 
 
 // number of position and velocity coordinates for each joint type
@@ -1762,11 +1814,14 @@ static int sensorSize(mjtSensor sensor_type, int sensor_dim) {
   return -1;
 }
 
+
+
 // returns the number of objects of the given type
 //   -1: mjOBJ_UNKNOWN
 //   -2: invalid objtype
 static int numObjects(const mjModel* m, mjtObj objtype) {
   switch (objtype) {
+  case mjOBJ_FRAME:
   case mjOBJ_UNKNOWN:
     return -1;
   case mjOBJ_BODY:
@@ -1818,9 +1873,13 @@ static int numObjects(const mjModel* m, mjtObj objtype) {
     return m->nkey;
   case mjOBJ_PLUGIN:
     return m->nplugin;
+  case mjNOBJECT:
+    return -2;
   }
   return -2;
 }
+
+
 
 // validate reference fields in a model; return null if valid, error message otherwise
 const char* mj_validateReferences(const mjModel* m) {
@@ -1915,7 +1974,10 @@ const char* mj_validateReferences(const mjModel* m) {
   X(name_textadr,       ntext,          nnames        , 0                      ) \
   X(name_tupleadr,      ntuple,         nnames        , 0                      ) \
   X(name_keyadr,        nkey,           nnames        , 0                      ) \
-  X(mesh_pathadr,       nmesh,          npaths        , 0                      )
+  X(hfield_pathadr,     nhfield,        npaths        , 0                      ) \
+  X(mesh_pathadr,       nmesh,          npaths        , 0                      ) \
+  X(skin_pathadr,       nskin,          npaths        , 0                      ) \
+  X(tex_pathadr,        ntex,           npaths        , 0                      )
 
   #define X(adrarray, nadrs, ntarget, numarray) {             \
     int *nums = (numarray);                                   \

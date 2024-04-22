@@ -77,12 +77,15 @@ public class MjActuator : MjComponent {
     }
 
     public void FromMjcf(XmlElement mjcf) {
-      CtrlLimited = mjcf.GetBoolAttribute("ctrllimited", defaultValue: false);
-      ForceLimited = mjcf.GetBoolAttribute("forcelimited", defaultValue: false);
       CtrlRange = mjcf.GetVector2Attribute("ctrlrange", defaultValue: Vector2.zero);
       ForceRange = mjcf.GetVector2Attribute("forcerange", defaultValue: Vector2.zero);
       LengthRange = mjcf.GetVector2Attribute("lengthrange", defaultValue: Vector2.zero);
       Gear = mjcf.GetFloatArrayAttribute("gear", defaultValue: new float[] { 1.0f }).ToList();
+
+      CtrlLimited = mjcf.GetLimitedAttribute("ctrllimited",
+          rangeDefined: mjcf.HasAttribute("ctrlrange"));
+      ForceLimited = mjcf.GetLimitedAttribute("forcelimited",
+          rangeDefined: mjcf.HasAttribute("forcerange"));
     }
   }
 

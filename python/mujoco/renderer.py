@@ -78,8 +78,11 @@ the clause:
 
     # Create render contexts.
     # TODO(nimrod): Figure out why pytype doesn't like gl_context.GLContext
-    self._gl_context = gl_context.GLContext(width, height)  # type: ignore
-    self._gl_context.make_current()
+    self._gl_context = None  # type: ignore
+    if gl_context.GLContext is not None:
+      self._gl_context = gl_context.GLContext(width, height)
+    if self._gl_context:
+      self._gl_context.make_current()
     self._mjr_context = _render.MjrContext(
         model, _enums.mjtFontScale.mjFONTSCALE_150.value
     )
@@ -136,6 +139,9 @@ the clause:
       A new numpy array holding the pixels with shape `(H, W)` or `(H, W, 3)`,
       depending on the value of `self._depth_rendering` unless
       `out is None`, in which case a reference to `out` is returned.
+
+    Raises:
+      RuntimeError: if this method is called after the close method.
     """
     original_flags = self._scene.flags.copy()
 
@@ -145,7 +151,11 @@ the clause:
       self._scene.flags[_enums.mjtRndFlag.mjRND_SEGMENT] = True
       self._scene.flags[_enums.mjtRndFlag.mjRND_IDCOLOR] = True
 
-    self._gl_context.make_current()
+    if self._mjr_context is None:
+      raise RuntimeError('render cannot be called after close.')
+
+    if self._gl_context:
+      self._gl_context.make_current()
 
     if self._depth_rendering:
       out_shape = (self._height, self._width)
@@ -288,3 +298,38 @@ the clause:
         camera, _enums.mjtCatBit.mjCAT_ALL.value,
         self._scene,
     )
+
+  def close(self) -> None:
+    """Frees the resources used by the renderer.
+
+    This method can be used directly:
+
+    ```python
+    renderer = Renderer(...)
+    # Use renderer.
+    renderer.close()
+    ```
+
+    or via a context manager:
+
+    ```python
+    with Renderer(...) as renderer:
+      # Use renderer.
+    ```
+    """
+    if self._gl_context:
+      self._gl_context.free()
+    self._gl_context = None
+    if self._mjr_context:
+      self._mjr_context.free()
+    self._mjr_context = None
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    del exc_type, exc_value, traceback  # Unused.
+    self.close()
+
+  def __del__(self) -> None:
+    self.close()

@@ -69,6 +69,12 @@ These functions can be used to print various quantities to the screen for debugg
 These are components of the simulation pipeline, called internally from :ref:`mj_step`, :ref:`mj_forward` and
 :ref:`mj_inverse`. It is unlikely that the user will need to call them.
 
+.. _mj_implicit:
+
+Integrates the simulation state using an implicit-in-velocity integrator (either "implicit" or "implicitfast", see
+:ref:`Numerical Integration<geIntegration>`), and advances simulation time. See `mjdata.h
+<https://github.com/google-deepmind/mujoco/blob/main/include/mujoco/mjdata.h>`__ for fields computed by this function.
+
 .. _Subcomponents:
 
 These are sub-components of the simulation pipeline, called internally from the components above. It is very unlikely
@@ -166,6 +172,13 @@ the advantages of working in minimal coordinates.
 
 This and the remaining variants of the Jacobian function call mj_jac internally, with the center of the body, geom or
 site. They are just shortcuts; the same can be achieved by calling mj_jac directly.
+
+.. _mj_angmomMat:
+
+This function computes the ``3 x nv`` angular momentum matrix :math:`H(q)`, providing the linear mapping from
+generalized velocities to subtree angular momentum. More precisely if :math:`h` is the subtree angular momentum of
+body index ``body`` in ``mjData.subtree_angmom`` (reported by the :ref:`subtreeangmom<sensor-subtreeangmom>` sensor)
+and :math:`\dot q` is the generalized velocity ``mjData.qvel``, then :math:`h = H \dot q`.
 
 .. _mj_mulM:
 
@@ -486,10 +499,10 @@ outputs (optional):
 
 notes:
   The initial value of ``res`` is used to warmstart the solver.
-  ``R`` must have allocatd size ``n*(n+7)``, but only ``nfree*nfree`` values are used in output.
-  ``index`` (if given) must have allocated size ``n``, but only ``nfree`` values are used in output.
+  ``R`` must have allocated size ``n*(n+7)``, but only ``nfree*nfree`` values are used as output.
+  ``index`` (if given) must have allocated size ``n``, but only ``nfree`` values are used as output.
   The convenience function :ref:`mju_boxQPmalloc` allocates the required data structures.
-  Only the lower triangles of H and R and are read from and written to, respectively.
+  Only the lower triangles of H and R are read from and written to, respectively.
 
 .. _mju_boxQPmalloc:
 

@@ -26,8 +26,23 @@ test_model() {
   echo "Testing $model" >&2
 
   local iterations=10
-  if [[ "$model" == */composite/particle.xml && ${TESTSPEED_ASAN:-0} != 0 ]]; then
-    iterations=2
+  # for particularly slow models, only run 2 steps under ASAN, or skip.
+  if [[ ${TESTSPEED_ASAN:-0} != 0 ]]; then
+    if [[ "$model" == */composite/particle.xml ]]; then
+      # this test can take several minutes under ASAN
+      return 0
+    fi
+    if [[ "$model" == */benchmark/testdata/humanoid200.xml ||
+          "$model" == */engine/testdata/collision_convex/stacked_boxes.xml ||
+          "$model" == */user/testdata/shark_41_ascii_gmshApp.xml ||
+          "$model" == */user/testdata/shark_22_ascii_fTetWild.xml ||
+          "$model" == */user/testdata/shark_22_ascii_gmshApp.xml ||
+          "$model" == */user/testdata/shark_22_binary_fTetWild.xml ||
+          "$model" == */user/testdata/shark_41_binary_gmshApp.xml ||
+          "$model" == */user/testdata/shark_22_binary_gmshApp.xml
+    ]]; then
+      iterations=2
+    fi
   fi
 
   # run testspeed, writing its output to stderr.

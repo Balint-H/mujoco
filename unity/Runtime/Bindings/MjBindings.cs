@@ -58,7 +58,7 @@ public const bool THIRD_PARTY_MUJOCO_MJRENDER_H_ = true;
 public const int mjNAUX = 10;
 public const int mjMAXTEXTURE = 1000;
 public const bool THIRD_PARTY_MUJOCO_INCLUDE_MJTHREAD_H_ = true;
-public const int mjMAXTHREADS = 128;
+public const int mjMAXTHREAD = 128;
 public const bool THIRD_PARTY_MUJOCO_INCLUDE_MJTNUM_H_ = true;
 public const bool mjUSEDOUBLE = true;
 public const double mjMINVAL = 1e-15;
@@ -108,7 +108,7 @@ public const int mjMAXLINEPNT = 1000;
 public const int mjMAXPLANEGRID = 200;
 public const bool THIRD_PARTY_MUJOCO_MJXMACRO_H_ = true;
 public const bool THIRD_PARTY_MUJOCO_MUJOCO_H_ = true;
-public const int mjVERSION_HEADER = 302;
+public const int mjVERSION_HEADER = 315;
 
 
 // ------------------------------------Enums------------------------------------
@@ -138,9 +138,8 @@ public enum mjtTimer : int{
   mjTIMER_POS_MAKE = 11,
   mjTIMER_POS_PROJECT = 12,
   mjTIMER_COL_BROAD = 13,
-  mjTIMER_COL_MID = 14,
-  mjTIMER_COL_NARROW = 15,
-  mjNTIMER = 16,
+  mjTIMER_COL_NARROW = 14,
+  mjNTIMER = 15,
 }
 public enum mjtDisableBit : int{
   mjDSBL_CONSTRAINT = 1,
@@ -165,10 +164,9 @@ public enum mjtEnableBit : int{
   mjENBL_ENERGY = 2,
   mjENBL_FWDINV = 4,
   mjENBL_INVDISCRETE = 8,
-  mjENBL_SENSORNOISE = 16,
-  mjENBL_MULTICCD = 32,
-  mjENBL_ISLAND = 64,
-  mjNENABLE = 7,
+  mjENBL_MULTICCD = 16,
+  mjENBL_ISLAND = 32,
+  mjNENABLE = 6,
 }
 public enum mjtJoint : int{
   mjJNT_FREE = 0,
@@ -191,10 +189,11 @@ public enum mjtGeom : int{
   mjGEOM_ARROW1 = 101,
   mjGEOM_ARROW2 = 102,
   mjGEOM_LINE = 103,
-  mjGEOM_FLEX = 104,
-  mjGEOM_SKIN = 105,
-  mjGEOM_LABEL = 106,
-  mjGEOM_TRIANGLE = 107,
+  mjGEOM_LINEBOX = 104,
+  mjGEOM_FLEX = 105,
+  mjGEOM_SKIN = 106,
+  mjGEOM_LABEL = 107,
+  mjGEOM_TRIANGLE = 108,
   mjGEOM_NONE = 1001,
 }
 public enum mjtCamLight : int{
@@ -301,6 +300,8 @@ public enum mjtObj : int{
   mjOBJ_TUPLE = 23,
   mjOBJ_KEY = 24,
   mjOBJ_PLUGIN = 25,
+  mjNOBJECT = 26,
+  mjOBJ_FRAME = 100,
 }
 public enum mjtConstraint : int{
   mjCNSTR_EQUALITY = 0,
@@ -767,7 +768,6 @@ public unsafe struct mjData_ {
   public mjTimerStat_ timer12;
   public mjTimerStat_ timer13;
   public mjTimerStat_ timer14;
-  public mjTimerStat_ timer15;
   public mjSolverStat_ solver0;
   public mjSolverStat_ solver1;
   public mjSolverStat_ solver2;
@@ -4938,6 +4938,7 @@ public unsafe struct _mjVFS
   [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2000 * 1000)] public char[] filename;
   [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2000)] public UIntPtr[] filesize;
   [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2000)] public IntPtr[] filedata;
+  [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2000)] public UInt64[] filestamp;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -4985,6 +4986,7 @@ public unsafe struct global {
   public int offwidth;
   public int offheight;
   public int ellipsoidinertia;
+  public int bvactive;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -5067,6 +5069,8 @@ public unsafe struct rgba {
   public fixed float slidercrank[4];
   public fixed float crankbroken[4];
   public fixed float frustum[4];
+  public fixed float bv[4];
+  public fixed float bvactive[4];
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -5213,6 +5217,7 @@ public unsafe struct mjModel_ {
   public int* jnt_group;
   public byte* jnt_limited;
   public byte* jnt_actfrclimited;
+  public byte* jnt_actgravcomp;
   public double* jnt_solref;
   public double* jnt_solimp;
   public double* jnt_pos;
@@ -5289,6 +5294,7 @@ public unsafe struct mjModel_ {
   public int* light_targetbodyid;
   public byte* light_directional;
   public byte* light_castshadow;
+  public float* light_bulbradius;
   public byte* light_active;
   public double* light_pos;
   public double* light_dir;
@@ -5362,8 +5368,6 @@ public unsafe struct mjModel_ {
   public int* mesh_texcoordadr;
   public int* mesh_texcoordnum;
   public int* mesh_graphadr;
-  public double* mesh_pos;
-  public double* mesh_quat;
   public float* mesh_vert;
   public float* mesh_normal;
   public float* mesh_texcoord;
@@ -5371,6 +5375,9 @@ public unsafe struct mjModel_ {
   public int* mesh_facenormal;
   public int* mesh_facetexcoord;
   public int* mesh_graph;
+  public double* mesh_scale;
+  public double* mesh_pos;
+  public double* mesh_quat;
   public int* mesh_pathadr;
   public int* skin_matid;
   public int* skin_group;
@@ -5393,16 +5400,19 @@ public unsafe struct mjModel_ {
   public int* skin_bonebodyid;
   public int* skin_bonevertid;
   public float* skin_bonevertweight;
+  public int* skin_pathadr;
   public double* hfield_size;
   public int* hfield_nrow;
   public int* hfield_ncol;
   public int* hfield_adr;
   public float* hfield_data;
+  public int* hfield_pathadr;
   public int* tex_type;
   public int* tex_height;
   public int* tex_width;
   public int* tex_adr;
   public byte* tex_rgb;
+  public int* tex_pathadr;
   public int* mat_texid;
   public byte* mat_texuniform;
   public float* mat_texrepeat;
@@ -5410,6 +5420,8 @@ public unsafe struct mjModel_ {
   public float* mat_specular;
   public float* mat_shininess;
   public float* mat_reflectance;
+  public float* mat_metallic;
+  public float* mat_roughness;
   public float* mat_rgba;
   public int* pair_dim;
   public int* pair_geom1;
@@ -5862,6 +5874,7 @@ public unsafe struct mjvLight_ {
   public byte headlight;
   public byte directional;
   public byte castshadow;
+  public float bulbradius;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -6090,6 +6103,7 @@ public unsafe struct model {
   public int nnames;
   public int npaths;
   public int nsensordata;
+  public int narena;
   public mjOption_ opt;
   public mjVisual_ vis;
   public mjStatistic_ stat;
@@ -6138,6 +6152,7 @@ public unsafe struct model {
   public float* cam_sensorsize;
   public byte* light_directional;
   public byte* light_castshadow;
+  public float* light_bulbradius;
   public byte* light_active;
   public float* light_attenuation;
   public float* light_cutoff;
@@ -6152,6 +6167,7 @@ public unsafe struct model {
   public int* flex_vertadr;
   public int* flex_vertnum;
   public int* flex_elem;
+  public int* flex_elemlayer;
   public int* flex_elemadr;
   public int* flex_elemnum;
   public int* flex_elemdataadr;
@@ -6163,6 +6179,7 @@ public unsafe struct model {
   public int* flex_bvhnum;
   public double* flex_radius;
   public float* flex_rgba;
+  public int* hfield_pathadr;
   public int* mesh_bvhadr;
   public int* mesh_bvhnum;
   public int* mesh_texcoordadr;
@@ -6188,6 +6205,8 @@ public unsafe struct model {
   public int* skin_bonebodyid;
   public int* skin_bonevertid;
   public float* skin_bonevertweight;
+  public int* skin_pathadr;
+  public int* tex_pathadr;
   public int* mat_texid;
   public byte* mat_texuniform;
   public float* mat_texrepeat;
@@ -6195,6 +6214,8 @@ public unsafe struct model {
   public float* mat_specular;
   public float* mat_shininess;
   public float* mat_reflectance;
+  public float* mat_metallic;
+  public float* mat_roughness;
   public float* mat_rgba;
   public int* eq_type;
   public int* eq_obj1id;
@@ -6278,6 +6299,7 @@ public unsafe struct data {
   public int* wrap_obj;
   public double* ten_length;
   public double* wrap_xpos;
+  public double* bvh_aabb_dyn;
   public byte* bvh_active;
   public int* island_dofadr;
   public int* island_dofind;
@@ -6287,6 +6309,7 @@ public unsafe struct data {
   public double* flexvert_xpos;
   public mjContact_* contact;
   public double* efc_force;
+  public void* arena;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -6308,7 +6331,7 @@ public static unsafe extern void mj_defaultVFS(void* vfs);
 public static unsafe extern int mj_addFileVFS(void* vfs, [MarshalAs(UnmanagedType.LPStr)]string directory, [MarshalAs(UnmanagedType.LPStr)]string filename);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern int mj_makeEmptyFileVFS(void* vfs, [MarshalAs(UnmanagedType.LPStr)]string filename, int filesize);
+public static unsafe extern int mj_addBufferVFS(void* vfs, [MarshalAs(UnmanagedType.LPStr)]string name, void* buffer, int nbuffer);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern int mj_findFileVFS(void* vfs, [MarshalAs(UnmanagedType.LPStr)]string filename);
@@ -6318,6 +6341,9 @@ public static unsafe extern int mj_deleteFileVFS(void* vfs, [MarshalAs(Unmanaged
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_deleteVFS(void* vfs);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern int mj_makeEmptyFileVFS(void* vfs, [MarshalAs(UnmanagedType.LPStr)]string filename, int filesize);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern mjModel_* mj_loadXML([MarshalAs(UnmanagedType.LPStr)]string filename, void* vfs, StringBuilder error, int error_sz);
@@ -6404,10 +6430,10 @@ public static unsafe extern void mj_freeStack(mjData_* d);
 public static unsafe extern void* mj_stackAllocByte(mjData_* d, UIntPtr bytes, UIntPtr alignment);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern double* mj_stackAllocNum(mjData_* d, int size);
+public static unsafe extern double* mj_stackAllocNum(mjData_* d, UIntPtr size);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
-public static unsafe extern int* mj_stackAllocInt(mjData_* d, int size);
+public static unsafe extern int* mj_stackAllocInt(mjData_* d, UIntPtr size);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_deleteData(mjData_* d);
@@ -6459,6 +6485,9 @@ public static unsafe extern void mj_Euler(mjModel_* m, mjData_* d);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_RungeKutta(mjModel_* m, mjData_* d, int N);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern void mj_implicit(mjModel_* m, mjData_* d);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_invPosition(mjModel_* m, mjData_* d);
@@ -6606,6 +6635,9 @@ public static unsafe extern void mj_jacSite(mjModel_* m, mjData_* d, double* jac
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_jacPointAxis(mjModel_* m, mjData_* d, double* jacPoint, double* jacAxis, double* point, double* axis, int body);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern void mj_angmomMat(mjModel_* m, mjData_* d, double* mat, int body);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern int mj_name2id(mjModel_* m, int type, [MarshalAs(UnmanagedType.LPStr)]string name);
@@ -7104,6 +7136,9 @@ public static unsafe extern void mju_quatIntegrate(double* quat, double* vel, do
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mju_quatZ2Vec(double* quat, double* vec);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern void mju_euler2Quat(double* quat, double* euler, [MarshalAs(UnmanagedType.LPStr)]string seq);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mju_mulPose(double* posres, double* quatres, double* pos1, double* quat1, double* pos2, double* quat2);
