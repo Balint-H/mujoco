@@ -164,10 +164,9 @@ public enum mjtEnableBit : int{
   mjENBL_ENERGY = 2,
   mjENBL_FWDINV = 4,
   mjENBL_INVDISCRETE = 8,
-  mjENBL_SENSORNOISE = 16,
-  mjENBL_MULTICCD = 32,
-  mjENBL_ISLAND = 64,
-  mjNENABLE = 7,
+  mjENBL_MULTICCD = 16,
+  mjENBL_ISLAND = 32,
+  mjNENABLE = 6,
 }
 public enum mjtJoint : int{
   mjJNT_FREE = 0,
@@ -302,6 +301,7 @@ public enum mjtObj : int{
   mjOBJ_KEY = 24,
   mjOBJ_PLUGIN = 25,
   mjNOBJECT = 26,
+  mjOBJ_FRAME = 100,
 }
 public enum mjtConstraint : int{
   mjCNSTR_EQUALITY = 0,
@@ -5217,6 +5217,7 @@ public unsafe struct mjModel_ {
   public int* jnt_group;
   public byte* jnt_limited;
   public byte* jnt_actfrclimited;
+  public byte* jnt_actgravcomp;
   public double* jnt_solref;
   public double* jnt_solimp;
   public double* jnt_pos;
@@ -7127,6 +7128,9 @@ public static unsafe extern void mju_quatIntegrate(double* quat, double* vel, do
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mju_quatZ2Vec(double* quat, double* vec);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern void mju_euler2Quat(double* quat, double* euler, [MarshalAs(UnmanagedType.LPStr)]string seq);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mju_mulPose(double* posres, double* quatres, double* pos1, double* quat1, double* pos2, double* quat2);
