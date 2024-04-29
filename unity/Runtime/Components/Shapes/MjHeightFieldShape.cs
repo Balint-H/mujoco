@@ -37,6 +37,8 @@ public class MjHeightFieldShape : IMjShape {
 
   public bool ExportImage => !string.IsNullOrEmpty(HeightMapExportPath);
 
+  public bool WriteHeightmapImageInBuild = false;
+
   public string FullHeightMapPath => Path.GetFullPath(Path.Combine(Application.dataPath,
       HeightMapExportPath));
 
@@ -115,7 +117,13 @@ public class MjHeightFieldShape : IMjShape {
       if (minimumHeight > 0.0001)
         Debug.LogWarning("Due to assumptions in MuJoCo heightfields, terrains should have a " +
                          "minimum heightmap value of 0.");
+#if !UNITY_EDITOR
+      if (!(Application.isPlaying && !WriteHeightmapImageInBuild))
+        File.WriteAllBytes(FullHeightMapPath, texture.EncodeToPNG());
+#else
+      Directory.CreateDirectory(Path.GetDirectoryName(FullHeightMapPath));
       File.WriteAllBytes(FullHeightMapPath, texture.EncodeToPNG());
+#endif
     } else if (Application.isPlaying) {
       MjScene.Instance.postInitEvent += (unused_first, unused_second) => UpdateHeightFieldData();
     }
