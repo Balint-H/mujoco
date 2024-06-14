@@ -124,7 +124,7 @@ public class MjHeightFieldShape : IMjShape {
       Directory.CreateDirectory(Path.GetDirectoryName(FullHeightMapPath));
       File.WriteAllBytes(FullHeightMapPath, texture.EncodeToPNG());
 #endif
-    } else if (Application.isPlaying) {
+    } else if (Application.isPlaying && !ExportImage) {
       MjScene.Instance.postInitEvent += (unused_first, unused_second) => UpdateHeightFieldData();
     }
   }
